@@ -1,0 +1,199 @@
+.page {
+  width: min(100% - 2.5rem, 62rem);
+  margin-inline: auto;
+  padding-block: clamp(3.25rem, 10vw, 8rem);
+}
+
+.intro {
+  padding-block-start: clamp(1.5rem, 4vw, 3rem);
+  border-top: 4px solid #0a6660;
+}
+
+.intro h1 {
+  max-width: 18ch;
+  margin: 0;
+  font-size: clamp(2.1rem, 7vw, 5.25rem);
+  line-height: 1.05;
+  letter-spacing: -0.055em;
+  overflow-wrap: anywhere;
+}
+
+.intro p {
+  max-width: 42ch;
+  margin: 1.25rem 0 0;
+  color: #455e58;
+  font-size: clamp(1rem, 2.4vw, 1.3rem);
+}
+
+:is(.catalog, .upcoming-bookings) {
+  display: grid;
+  gap: 1rem;
+  margin-block: 2rem 0;
+  padding: 0;
+  list-style: none;
+}
+
+.catalog {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 15rem), 1fr));
+}
+
+:is(.catalog, .upcoming-bookings) li {
+  padding: 1.25rem;
+  border: 1px solid #cbd9d3;
+  border-radius: 1rem;
+  background: #fff;
+  overflow-wrap: anywhere;
+}
+
+:is(.catalog, .upcoming-bookings) h2 {
+  margin: 0;
+  font-size: 1.25rem;
+}
+
+:is(.catalog, .upcoming-bookings) p {
+  margin: 0.75rem 0 0;
+  color: #455e58;
+}
+
+.catalog a {
+  color: #0a615b;
+  text-underline-offset: 0.2em;
+}
+
+.booking-guide {
+  margin-block-start: clamp(2rem, 7vw, 4.5rem);
+  padding: clamp(1.25rem, 4vw, 2.5rem);
+  border: 1px solid #cbd9d3;
+  border-radius: 1.25rem;
+  background: #fff;
+}
+
+.booking-guide h2 {
+  margin: 0;
+  font-size: 1.375rem;
+}
+
+.booking-steps {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.75rem;
+  margin: 1rem 0 1.5rem;
+  padding-inline-start: 1.45rem;
+}
+
+.booking-steps li {
+  padding-inline-start: 0.25rem;
+}
+
+.booking-steps li::marker {
+  color: #0a6660;
+  font-weight: 700;
+}
+
+.booking-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 3rem;
+  padding-inline: 1.5rem;
+  border-radius: 0.625rem;
+  background: #0a615b;
+  color: #fff;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.booking-link:hover {
+  background: #084b47;
+}
+
+.booking-link:focus-visible {
+  outline: 3px solid #0a615b;
+  outline-offset: 4px;
+}
+
+@media (max-width: 44rem) {
+  .booking-steps {
+    grid-template-columns: 1fr;
+  }
+}
+
+.page-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1.25rem;
+  margin-block-start: 1rem;
+}
+
+.page-links a {
+  display: inline-flex;
+  align-items: center;
+  min-height: 2.75rem;
+  color: #0a615b;
+  text-underline-offset: 0.2em;
+}
+
+:is(.event-type-form, .booking-form) {
+  max-width: 32rem;
+  margin-block-start: 1.25rem;
+}
+
+:is(.event-type-form, .booking-form) fieldset {
+  display: grid;
+  justify-items: start;
+  gap: 1rem;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+:is(.event-type-form, .booking-form) label {
+  display: grid;
+  gap: 0.25rem;
+  width: 100%;
+  font-weight: 600;
+}
+
+:is(.event-type-form, .booking-form) input,
+:is(.event-type-form, .booking-form) textarea {
+  width: 100%;
+  min-height: 2.75rem;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid #667d75;
+  border-radius: 0.5rem;
+  color: inherit;
+  font: inherit;
+  font-weight: 400;
+}
+
+:is(.event-type-form, .booking-form) textarea {
+  resize: vertical;
+}
+
+:is(.event-type-form, .booking-form) button {
+  border: 0;
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+:is(.event-type-form, .booking-form) button:disabled {
+  background-color: #455e58;
+  cursor: default;
+}
+
+.page-links a:focus-visible,
+:is(.event-type-form, .booking-form) input:focus-visible,
+:is(.event-type-form, .booking-form) textarea:focus-visible {
+  outline: 3px solid #0a615b;
+  outline-offset: 3px;
+}
+
+:is(.event-type-form, .booking-form) [role='status']:empty {
+  margin: 0;
+}
+
+:is(.event-type-form, .booking-form) [role='alert'] {
+  color: #9b2929;
+}

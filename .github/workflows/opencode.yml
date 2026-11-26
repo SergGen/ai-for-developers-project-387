@@ -1,0 +1,93 @@
+name: OpenCode
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+
+permissions: {}
+
+jobs:
+  authorize:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      pull-requests: read
+    outputs:
+      allowed: ${{ steps.comment.outputs.allowed }}
+    steps:
+      - name: Check command, author and pull request
+        id: comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! jq -e '
+            .comment.user.type == "User" and
+            ((.comment.body // "") | test("^\\s*/(opencode|oc)(\\s|$)"; "i"))
+          ' "$GITHUB_EVENT_PATH" >/dev/null; then
+            exit 0
+          fi
+
+          author=$(jq -er '.comment.user.login' "$GITHUB_EVENT_PATH")
+          if ! permission=$(gh api "repos/$GITHUB_REPOSITORY/collaborators/$author/permission" --jq '.permission'); then
+            echo "::warning::Could not verify the comment author's repository permissions."
+            exit 0
+          fi
+          case "$permission" in
+            admin|write) ;;
+            *) exit 0 ;;
+          esac
+
+          # An issue_comment on a PR includes a link, but no head repository.
+          if ! number=$(jq -er '
+            if env.GITHUB_EVENT_NAME == "pull_request_review_comment" then
+              .pull_request.number | select(type == "number" and . > 0)
+            elif env.GITHUB_EVENT_NAME == "issue_comment" then
+              .issue | select(.number | type == "number" and . > 0) |
+              if has("pull_request") then .number else 0 end
+            else empty end
+          ' "$GITHUB_EVENT_PATH"); then
+            echo "::warning::Could not verify the comment event."
+            exit 0
+          fi
+          if [[ "$number" != 0 ]]; then
+            repository_id=$(jq -er '.repository.id' "$GITHUB_EVENT_PATH")
+            if ! head_id=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$number" --jq '.head.repo.id'); then
+              echo "::warning::Could not verify the pull request head repository."
+              exit 0
+            fi
+            [[ "$head_id" == "$repository_id" ]] || exit 0
+          fi
+
+          echo 'allowed=true' >> "$GITHUB_OUTPUT"
+
+  opencode:
+    needs: authorize
+    if: needs.authorize.outputs.allowed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: opencode-${{ github.event.issue.number || github.event.pull_request.number }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write
+      issues: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - name: Install OpenCode CLI and refresh the model catalog
+        run: |
+          npm install --prefix "$RUNNER_TEMP/opencode" --ignore-scripts --no-audit --no-fund opencode-linux-x64@1.19.6
+          "$RUNNER_TEMP/opencode/node_modules/opencode-linux-x64/bin/opencode" models --refresh >/dev/null
+      - name: Run OpenCode
+        run: |
+          "$RUNNER_TEMP/opencode/node_modules/opencode-linux-x64/bin/opencode" github run
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GH_TOKEN: ${{ github.token }}
+          MODEL: openai/gpt-6.2-sol
+          MENTIONS: /opencode,/oc

@@ -1,0 +1,15 @@
+**
+!package.json
+!package-lock.json
+!index.html
+!tsconfig*.json
+!vite.config.ts
+!openapi-ts.config.ts
+!api/
+!api/**
+!public/
+!public/**
+!src/
+!src/**
+!server/
+!server/**
