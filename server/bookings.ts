@@ -6,6 +6,7 @@ import type { Interval } from './schedule.ts'
 export interface Booking extends Interval {
   eventTypeId: string
   guestName: string
+  topic?: string
 }
 
 export function listUpcomingBookings(
@@ -45,6 +46,7 @@ export function createBooking(
       return
     }
 
+    const topic = request.body.topic
     const interval = slotAt(startsAt, eventType.durationMinutes, now())
     if (!interval) {
       reply.code(400).send({ message: 'Выберите время из расписания' })
@@ -57,7 +59,8 @@ export function createBooking(
       return
     }
 
-    calendar.push({ ...interval, eventTypeId, guestName: name })
-    reply.code(201).send({ ...interval, eventType, guestName: name })
+    const topicField = topic === undefined ? {} : { topic }
+    calendar.push({ ...interval, eventTypeId, guestName: name, ...topicField })
+    reply.code(201).send({ ...interval, eventType, guestName: name, ...topicField })
   }
 }

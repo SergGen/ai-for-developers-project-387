@@ -22,11 +22,11 @@ async function withCalendar(run: (url: string) => Promise<void>) {
   }, run)
 }
 
-function postBooking(url: string, eventTypeId: string, startsAt: string, guestName = 'Анна') {
+function postBooking(url: string, eventTypeId: string, startsAt: string, guestName = 'Анна', topic?: string) {
   return fetch(`${url}/api/bookings`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ eventTypeId, startsAt, guestName }),
+    body: JSON.stringify({ eventTypeId, startsAt, guestName, ...(topic === undefined ? {} : { topic }) }),
   })
 }
 
@@ -38,6 +38,21 @@ test('POST /api/bookings matches a slot by instant and calculates the end from t
     expect(await response.json()).toEqual({
       eventType: consultation,
       guestName: 'Анна',
+      startsAt: '2026-11-30T06:00:00.000Z',
+      endsAt: '2026-11-30T06:30:00.000Z',
+    })
+  })
+})
+
+test('POST /api/bookings stores an optional topic and returns it with the booking', async () => {
+  await withCalendar(async (url) => {
+    const response = await postBooking(url, consultation.id, '2026-11-30T06:00:00Z', 'Анна', 'Обсудить проект')
+
+    expect(response.status).toBe(201)
+    expect(await response.json()).toEqual({
+      eventType: consultation,
+      guestName: 'Анна',
+      topic: 'Обсудить проект',
       startsAt: '2026-11-30T06:00:00.000Z',
       endsAt: '2026-11-30T06:30:00.000Z',
     })

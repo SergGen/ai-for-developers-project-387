@@ -12,11 +12,14 @@ model NewBooking {
   startsAt: offsetDateTime;
   @minLength(1)
   guestName: string;
+  @doc("Optional topic of this particular booking.")
+  topic?: string;
 }
 
 model ConfirmedBooking {
   eventType: EventType;
   guestName: string;
+  topic?: string;
   startsAt: utcDateTime;
   endsAt: utcDateTime;
 }

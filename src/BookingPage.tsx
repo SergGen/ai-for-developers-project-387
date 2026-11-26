@@ -38,6 +38,7 @@ export function BookingPage({ eventTypePath }: { eventTypePath: string }) {
   const [selectedDay, setSelectedDay] = useState<string>()
   const [selectedSlot, setSelectedSlot] = useState<Slot>()
   const [guestName, setGuestName] = useState('')
+  const [topic, setTopic] = useState('')
   const [submission, setSubmission] = useState<Submission>({ status: 'idle' })
 
   useEffect(() => {
@@ -86,7 +87,7 @@ export function BookingPage({ eventTypePath }: { eventTypePath: string }) {
     setSubmission({ status: 'submitting' })
     try {
       const { data, response } = await createBooking({
-        body: { eventTypeId: eventType.id, startsAt: selectedSlot.startsAt, guestName },
+        body: { eventTypeId: eventType.id, startsAt: selectedSlot.startsAt, guestName, ...(topic ? { topic } : {}) },
       })
       if (data) {
         setSubmission({ status: 'confirmed', booking: data })
@@ -152,6 +153,11 @@ export function BookingPage({ eventTypePath }: { eventTypePath: string }) {
                   Ваше имя
                   <input name="guestName" autoComplete="name" value={guestName}
                     onChange={(event) => setGuestName(event.target.value)} required />
+                </label>
+                <label>
+                  Тема встречи
+                  <input name="topic" value={topic}
+                    onChange={(event) => setTopic(event.target.value)} placeholder="Необязательно" />
                 </label>
                 <button className="booking-link" type="submit" disabled={!selectedSlot || !guestName.trim()}>
                   {submission.status === 'submitting' ? 'Подтверждаем…' : 'Подтвердить запись'}
