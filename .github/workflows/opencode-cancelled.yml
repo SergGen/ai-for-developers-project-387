@@ -1,0 +1,41 @@
+name: OpenCode cancellation report
+
+on:
+  workflow_run:
+    workflows: [OpenCode, OpenCode PR review]
+    types: [completed]
+
+permissions: {}
+
+jobs:
+  report:
+    if: >-
+      (github.event.workflow_run.conclusion == 'cancelled' || github.event.workflow_run.conclusion == 'timed_out') &&
+      github.event.workflow_run.head_repository.id == github.event.repository.id
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      actions: read
+      pull-requests: write
+    steps:
+      - name: Report an interrupted admitted attempt
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Use only GitHub metadata. This privileged observer never checks out a PR.
+          run=$(jq -er '.workflow_run |
+            select(.path == ".github/workflows/opencode.yml" or .path == ".github/workflows/review.yml") |
+            [.id, .run_attempt, .conclusion, .display_title] | @tsv' "$GITHUB_EVENT_PATH") || exit 0
+          IFS=$'\t' read -r id attempt conclusion title <<< "$run"
+          [[ "$title" =~ ^PR\ \#([1-9][0-9]*)\ OpenCode\ (review|command)$ ]] || exit 0
+          pr=${BASH_REMATCH[1]}
+          jobs=$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$id/attempts/$attempt/jobs?per_page=100" --jq '
+            .jobs[] | select(any(.steps[]?; .name == "Reserve OpenCode PR attempt" and .conclusion == "success")) | .id')
+          [[ -n "$jobs" ]] || exit 0
+          sha=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$pr" --jq 'select(.head.repo.id == .base.repo.id) | .head.sha')
+          [[ -n "$sha" ]] || exit 0
+          reason=cancelled
+          [[ "$conclusion" != timed_out ]] || reason=timeout
+          logs="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$id/attempts/$attempt"
+          gh pr comment "$pr" --repo "$GITHUB_REPOSITORY" \
+            --body "Нужен человек. Попытка прервана после допуска. Причина — $reason. Текущий head SHA — $sha. [Журнал попытки]($logs)."

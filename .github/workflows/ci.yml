@@ -1,13 +1,18 @@
 name: CI
 
-on: push
+on:
+  push:
+    branches: [main]
+  pull_request:
 
 permissions:
   contents: read
 
 jobs:
   check:
+    name: Calendar CI
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
         with:
@@ -16,5 +21,69 @@ jobs:
         with:
           version: '2026.11.14'
       - run: mise run setup
+      - name: Test the PR attempt budget
+        run: mise exec -- node --test .github/scripts/budget.test.mjs
+      - name: Save freshly generated API for comparison
+        run: |
+          test -s generated/openapi.json
+          test -s generated/sdk/sdk.gen.ts
+          cp -r generated "$RUNNER_TEMP/generated-baseline"
       - run: mise exec -- npx playwright install --with-deps chromium
       - run: mise run check
+      - name: Verify regeneration is reproducible
+        run: diff -qr "$RUNNER_TEMP/generated-baseline" generated
+
+  browser:
+    name: Browser evidence (PR head)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Verify checked-out commit
+        id: head
+        run: |
+          actual_sha=$(git rev-parse HEAD)
+          echo "sha=$actual_sha" >> "$GITHUB_OUTPUT"
+          test "$actual_sha" = "$EXPECTED_SHA"
+      - uses: jdx/mise-action@v5
+        with:
+          version: '2026.11.14'
+      - run: mise run setup
+      - run: mise exec -- npx playwright install --with-deps chromium
+      - name: Trace the guest and owner booking scenarios
+        id: browser
+        env:
+          PLAYWRIGHT_JSON_OUTPUT_NAME: ${{ runner.temp }}/browser-evidence/results.json
+        run: |
+          evidence="$RUNNER_TEMP/browser-evidence"
+          mkdir -p "$evidence"
+          mise exec -- npx playwright test e2e/upcoming.e2e.ts --trace on --reporter=list,json --output="$evidence/traces"
+          jq -e '.stats | .expected > 0 and .skipped == 0 and .flaky == 0 and .unexpected == 0' "$evidence/results.json"
+          test -n "$(find "$evidence/traces" -name trace.zip -type f -size +0c -print -quit)"
+      - name: Record verification result
+        if: always()
+        env:
+          SHA: ${{ steps.head.outputs.sha }}
+          RESULT: ${{ steps.browser.outcome }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/browser-evidence"
+          jq -n --argjson pr "$PR_NUMBER" --arg sha "$SHA" --arg expected "$EXPECTED_SHA" --arg result "$RESULT" \
+            '{pr: $pr, sha: $sha, expected_sha: $expected, result: $result}' > "$RUNNER_TEMP/browser-evidence/verification.json"
+          cat "$RUNNER_TEMP/browser-evidence/verification.json" >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload traces, Playwright results and verified commit
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: browser-pr-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/browser-evidence/verification.json
+            ${{ runner.temp }}/browser-evidence/results.json
+            ${{ runner.temp }}/browser-evidence/traces/**/trace.zip
+          if-no-files-found: error

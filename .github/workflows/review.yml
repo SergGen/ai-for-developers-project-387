@@ -1,0 +1,191 @@
+name: OpenCode PR review
+run-name: 'PR #${{ github.event.pull_request.number }} OpenCode review'
+
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review, synchronize]
+
+permissions: {}
+
+concurrency:
+  group: opencode-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  authorize:
+    if: >-
+      !github.event.pull_request.draft &&
+      github.event.pull_request.base.ref == github.event.repository.default_branch &&
+      github.event.pull_request.head.repo.id == github.event.repository.id
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      contents: read
+    outputs:
+      allowed: ${{ steps.trust.outputs.allowed }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+      - id: trust
+        name: Verify trusted base and PR author
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [[ ! -f REVIEW.md || ! -f .github/scripts/review-context.py || ! -f .github/scripts/budget.mjs ]]; then
+            echo "Review is not installed on the base commit yet." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          author=$(jq -er '.pull_request.user.login' "$GITHUB_EVENT_PATH")
+          if jq -e '.pull_request | .user.type == "Bot" and (
+            (.user.id == 219766164 and .user.login == "opencode-agent[bot]") or
+            (.user.id == 41898282 and .user.login == "github-actions[bot]" and
+             (.head.ref == "release-please--branches--main--components--ai-for-developers-project-387"))
+          )' "$GITHUB_EVENT_PATH" >/dev/null; then
+            echo 'allowed=true' >> "$GITHUB_OUTPUT"
+          elif jq -e '.pull_request.user.type == "User"' "$GITHUB_EVENT_PATH" >/dev/null; then
+            permission=$(gh api "repos/$GITHUB_REPOSITORY/collaborators/$author/permission" --jq .permission)
+            case "$permission" in
+              admin|write) echo 'allowed=true' >> "$GITHUB_OUTPUT" ;;
+            esac
+          fi
+
+  review:
+    needs: authorize
+    if: needs.authorize.outputs.allowed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 14
+    concurrency:
+      group: opencode-model-pr-${{ github.event.pull_request.number }}
+      cancel-in-progress: false
+      queue: max
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+      actions: read
+      checks: read
+      statuses: read
+    env:
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+    outputs:
+      reason: ${{ steps.outcome.outputs.reason }}
+      artifact_id: ${{ steps.save.outputs.artifact-id }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+      - id: budget
+        name: Check shared PR budget
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node .github/scripts/budget.mjs
+      - name: Reserve OpenCode PR attempt
+        if: steps.budget.outputs.allowed == 'true'
+        run: echo 'PR attempt reserved'
+      - name: Gather review inputs from GitHub
+        if: steps.budget.outputs.allowed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .github/scripts/review-context.py > "$RUNNER_TEMP/review-prompt.txt"
+      - name: Install reviewer
+        if: steps.budget.outputs.allowed == 'true'
+        env:
+          MODEL_KEY_PRESENT: ${{ secrets.OPENCODE_API_KEY != '' }}
+        run: |
+          [[ "$MODEL_KEY_PRESENT" == true || "$MODEL_KEY_PRESENT" == True ]]
+          npm install --prefix "$RUNNER_TEMP/reviewer" --ignore-scripts --no-audit --no-fund opencode-linux-x64@1.19.6
+          "$RUNNER_TEMP/reviewer/node_modules/opencode-linux-x64/bin/opencode" models --refresh > /dev/null
+      - id: model
+        name: Review in an isolated session
+        if: steps.budget.outputs.allowed == 'true'
+        env:
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+          OPENCODE_CONFIG_CONTENT: '{"permission":{"*":"deny"},"share":"disabled","small_model":"opencode/deepseek-v4.1-flash-free"}'
+        run: |
+          mkdir "$RUNNER_TEMP/review-session"
+          cd "$RUNNER_TEMP/review-session"
+          rc=0
+          timeout --kill-after=10s 420s "$RUNNER_TEMP/reviewer/node_modules/opencode-linux-x64/bin/opencode" run \
+            --model opencode/deepseek-v4.1-flash-free --format json < "$RUNNER_TEMP/review-prompt.txt" > events.jsonl || rc=$?
+          if [[ "$rc" == 124 || "$rc" == 137 ]]; then
+            echo "reason=timeout" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          if [[ "$rc" != 0 ]] || jq -es 'any(.[]; .type == "error")' events.jsonl >/dev/null; then
+            if grep -Eqi '(^|[^0-9])429([^0-9]|$)|rate.limit|too many requests' events.jsonl; then
+              echo '::warning::Model provider reported rate limiting (HTTP 429).'
+            fi
+            echo "reason=agent_failed" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          jq -ers '[.[] | select(.type == "text") | .part.text] | join("\n") | select(test("\\S")) | .[:55000]' events.jsonl > "$RUNNER_TEMP/review.md"
+      - id: save
+        name: Save review text for the publisher
+        if: steps.budget.outputs.allowed == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: review-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/review.md
+          if-no-files-found: error
+      - id: outcome
+        name: Classify review outcome
+        if: always()
+        env:
+          BUDGET_REASON: ${{ steps.budget.outputs.reason }}
+          ALLOWED: ${{ steps.budget.outputs.allowed }}
+          MODEL_REASON: ${{ steps.model.outputs.reason }}
+          MODEL_STATUS: ${{ steps.model.outcome }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          if [[ "$ALLOWED" != true ]]; then reason=${BUDGET_REASON:-infra}
+          elif [[ -n "$MODEL_REASON" ]]; then reason=$MODEL_REASON
+          elif [[ "$MODEL_STATUS" == failure ]]; then reason=agent_failed
+          elif [[ "$JOB_STATUS" != success ]]; then reason=infra
+          else exit 0
+          fi
+          echo "reason=$reason" >> "$GITHUB_OUTPUT"
+          exit 1
+
+  publish:
+    needs: [authorize, review]
+    if: ${{ !cancelled() && needs.authorize.outputs.allowed == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      pull-requests: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      REVIEW_SHA: ${{ github.event.pull_request.head.sha }}
+      REASON: ${{ needs.review.outputs.reason }}
+      REVIEW_STATUS: ${{ needs.review.result }}
+    steps:
+      - name: Retrieve review text
+        if: needs.review.result == 'success'
+        uses: actions/download-artifact@v4
+        with:
+          artifact-ids: ${{ needs.review.outputs.artifact_id }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/review
+      - name: Publish result on the reviewed PR
+        if: ${{ !cancelled() }}
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          sha=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq .head.sha)
+          logs="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT"
+          if [[ "$sha" != "$REVIEW_SHA" ]]; then
+            echo "Head changed since review ($REVIEW_SHA → $sha)." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          report="$RUNNER_TEMP/comment.md"
+          printf '### Авторевью OpenCode\n\nКоммит `%s` · [Журнал запуска](%s)\n\n' "$REVIEW_SHA" "$logs" > "$report"
+          if [[ "$REVIEW_STATUS" == success && "$JOB_STATUS" == success && -s "$RUNNER_TEMP/review/review.md" ]]; then
+            cat "$RUNNER_TEMP/review/review.md" >> "$report"
+          else
+            printf 'Нужен человек. Причина `%s`.\n' "${REASON:-infra}" >> "$report"
+          fi
+          gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --body-file "$report"
