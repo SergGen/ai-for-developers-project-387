@@ -87,7 +87,7 @@ jobs:
         run: |
           "$RUNNER_TEMP/opencode/node_modules/opencode-linux-x64/bin/opencode" github run
         env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
           GH_TOKEN: ${{ github.token }}
-          MODEL: openai/gpt-6.2-sol
+          MODEL: opencode/deepseek-v4.1-flash-free
           MENTIONS: /opencode,/oc

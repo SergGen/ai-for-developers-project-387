@@ -82,7 +82,7 @@ docker run --rm -e PORT=8080 -p 127.0.0.1:8080:8080 call-calendar
 
 Workflow OpenCode отвечает на вопросы по проекту в обсуждениях GitHub. Чтобы вызвать агента, начните новый комментарий с `/oc` или `/opencode`. Например, оставьте `/oc explain this issue` под задачей. Поддерживаются комментарии к задачам, pull request и строкам diff. Агент отвечает в том же обсуждении. Ход выполнения доступен в разделе Actions → OpenCode. [Файл workflow](.github/workflows/opencode.yml)
 
-Workflow использует модель `openai/gpt-6.2-sol` и секрет репозитория `OPENAI_API_KEY`. Для настройки установите OpenCode GitHub App на этот репозиторий и добавьте API-ключ OpenAI в Settings → Secrets and variables → Actions. Первая проверка требует ключа с доступом к выбранной модели. [OpenCode GitHub App](https://github.com/apps/opencode-agent)
+Workflow использует бесплатную модель `opencode/deepseek-v4.1-flash-free` для ответов и служебных запросов. Для настройки установите OpenCode GitHub App, создайте ключ в пространстве Personal в OpenCode Console и добавьте его как секрет репозитория `OPENCODE_API_KEY` в Settings → Secrets and variables → Actions. Бесплатная модель доступна ограниченное время. Если исчерпан дневной лимит, повторите запуск после его обновления. [OpenCode GitHub App](https://github.com/apps/opencode-agent) · [Настройка ключа](https://help.hexlet.io/ai/opencode#ключ-для-github-actions)
 
 Запуск доступен людям с правом записи в репозиторий. Workflow реагирует только на создание комментария. Команды ботов и команды в PR из форков отсекаются до запуска модели. В PR из этого репозитория OpenCode работает с кодом из ветки PR. Для одного обсуждения одновременно выполняется один запуск агента. Тайм-аут — 10 минут.
 
