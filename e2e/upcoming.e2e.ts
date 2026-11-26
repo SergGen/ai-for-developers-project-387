@@ -17,15 +17,17 @@ async function createMeetingType(page: Page, title = 'Знакомство') {
   await expect(page.getByRole('status')).toContainText(`Тип встречи «${title}» сохранён.`)
 }
 
-async function bookMeeting(
+interface BookingForm {
+  title?: string
+  day?: string
+  slot?: string
+  guestName: string
+  topic?: string
+}
+
+async function fillBooking(
   guest: Page,
-  { title = 'Знакомство', day = 'понедельник, 30 ноября', slot = '09:00–09:15', guestName, topic }: {
-    title?: string
-    day?: string
-    slot?: string
-    guestName: string
-    topic?: string
-  },
+  { title = 'Знакомство', day = 'понедельник, 30 ноября', slot = '09:00–09:15', guestName, topic }: BookingForm,
 ) {
   await guest.goto('/')
   await guest.getByRole('link', { name: 'Записаться' }).click()
@@ -36,6 +38,10 @@ async function bookMeeting(
   if (topic !== undefined) {
     await guest.getByRole('textbox', { name: 'Тема встречи' }).fill(topic)
   }
+}
+
+async function bookMeeting(guest: Page, form: BookingForm) {
+  await fillBooking(guest, form)
   await guest.getByRole('button', { name: 'Подтвердить запись' }).click()
   await expect(guest.getByRole('heading', { name: 'Запись подтверждена' })).toBeVisible()
 }
@@ -70,4 +76,15 @@ test('the owner sees a meeting booked without a topic as before', async ({ page,
   await expect(meeting).toContainText('30 ноября 2026 г.')
   await expect(meeting).toContainText('09:00–09:15 по Москве')
   await expect(meeting).not.toContainText('Тема:')
+})
+
+test('the guest sees a clear error and keeps the slot when the topic is too long', async ({ page, context }) => {
+  await createMeetingType(page)
+
+  const guest = await context.newPage()
+  await fillBooking(guest, { guestName: 'Мария', topic: 'а'.repeat(201) })
+
+  await expect(guest.getByRole('alert')).toHaveText('Тема встречи не должна превышать 200 символов')
+  await expect(guest.getByRole('button', { name: 'Подтвердить запись' })).toBeDisabled()
+  await expect(guest.getByRole('radio', { name: '09:00–09:15', exact: true })).toBeChecked()
 })

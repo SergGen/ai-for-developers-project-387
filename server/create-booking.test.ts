@@ -26,7 +26,7 @@ function postBooking(url: string, eventTypeId: string, startsAt: string, guestNa
   return fetch(`${url}/api/bookings`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ eventTypeId, startsAt, guestName, ...(topic === undefined ? {} : { topic }) }),
+    body: JSON.stringify({ eventTypeId, startsAt, guestName, topic }),
   })
 }
 
@@ -56,6 +56,96 @@ test('POST /api/bookings stores an optional topic and returns it with the bookin
       startsAt: '2026-11-30T06:00:00.000Z',
       endsAt: '2026-11-30T06:30:00.000Z',
     })
+  })
+})
+
+test('POST /api/bookings trims a topic and treats a blank topic as absent', async () => {
+  await withCalendar(async (url) => {
+    const trimmed = await postBooking(url, consultation.id, '2026-11-30T06:00:00Z', 'Анна', '  Обсудить проект  ')
+    expect(trimmed.status).toBe(201)
+    expect(await trimmed.json()).toEqual({
+      eventType: consultation,
+      guestName: 'Анна',
+      topic: 'Обсудить проект',
+      startsAt: '2026-11-30T06:00:00.000Z',
+      endsAt: '2026-11-30T06:30:00.000Z',
+    })
+
+    const blank = await postBooking(url, consultation.id, '2026-11-30T06:30:00Z', 'Борис', ' \t ')
+    expect(blank.status).toBe(201)
+    expect(await blank.json()).not.toHaveProperty('topic')
+
+    const upcoming = await fetch(`${url}/api/bookings/upcoming`)
+    const bookings = await upcoming.json() as Array<{ guestName: string; topic?: string }>
+    expect(bookings.find(({ guestName }) => guestName === 'Анна')).toMatchObject({ topic: 'Обсудить проект' })
+    expect(bookings.find(({ guestName }) => guestName === 'Борис')).not.toHaveProperty('topic')
+  })
+})
+
+test('POST /api/bookings accepts a topic of exactly 200 characters after trimming', async () => {
+  await withCalendar(async (url) => {
+    const topic = 'а'.repeat(200)
+    const response = await postBooking(url, consultation.id, '2026-11-30T06:00:00Z', 'Анна', `  ${topic}  `)
+
+    expect(response.status).toBe(201)
+    expect(await response.json()).toMatchObject({ topic })
+  })
+})
+
+test('POST /api/bookings rejects a topic longer than 200 characters after trimming and creates no booking', async () => {
+  await withCalendar(async (url) => {
+    const response = await postBooking(url, consultation.id, '2026-11-30T06:00:00Z', 'Анна', `  ${'а'.repeat(201)}  `)
+
+    expect(response.status).toBe(400)
+    expect(await response.json()).toEqual({ message: 'Тема встречи не должна превышать 200 символов' })
+
+    const upcoming = await fetch(`${url}/api/bookings/upcoming`)
+    expect(await upcoming.json()).toEqual([])
+  })
+})
+
+test('POST /api/bookings counts the topic limit in characters, not UTF-16 code units', async () => {
+  await withCalendar(async (url) => {
+    const topic = '😀'.repeat(200)
+    const accepted = await postBooking(url, consultation.id, '2026-11-30T06:00:00Z', 'Анна', topic)
+    expect(accepted.status).toBe(201)
+    expect(await accepted.json()).toMatchObject({ topic })
+
+    const rejected = await postBooking(url, consultation.id, '2026-11-30T06:30:00Z', 'Борис', '😀'.repeat(201))
+    expect(rejected.status).toBe(400)
+    expect(await rejected.json()).toEqual({ message: 'Тема встречи не должна превышать 200 символов' })
+
+    const upcoming = await fetch(`${url}/api/bookings/upcoming`)
+    expect(await upcoming.json()).toHaveLength(1)
+  })
+})
+
+test('POST /api/bookings rejects a conflicting interval with a topic and keeps only the first booking', async () => {
+  await withCalendar(async (url) => {
+    const first = await postBooking(url, review.id, '2026-11-30T07:00:00Z', 'Анна', 'Первый вопрос')
+    expect(first.status).toBe(201)
+    const firstBooking = await first.json()
+
+    const conflict = await postBooking(url, consultation.id, '2026-11-30T07:30:00Z', 'Борис', 'Второй вопрос')
+    expect(conflict.status).toBe(409)
+    expect(await conflict.json()).toEqual({ message: 'Это время уже занято. Выберите другой слот' })
+
+    const upcoming = await fetch(`${url}/api/bookings/upcoming`)
+    expect(await upcoming.json()).toEqual([firstBooking])
+  })
+})
+
+test('POST /api/bookings reports the interval conflict before an over-limit topic', async () => {
+  await withCalendar(async (url) => {
+    const first = await postBooking(url, review.id, '2026-11-30T07:00:00Z', 'Анна', 'Первый вопрос')
+    expect(first.status).toBe(201)
+
+    const conflict = await postBooking(url, consultation.id, '2026-11-30T07:30:00Z', 'Борис', 'а'.repeat(201))
+    expect(conflict.status).toBe(409)
+    expect(await conflict.json()).toEqual({ message: 'Это время уже занято. Выберите другой слот' })
+
+    const upcoming = await fetch(`${url}/api/bookings/upcoming`)
+    expect(await upcoming.json()).toHaveLength(1)
   })
 })
 

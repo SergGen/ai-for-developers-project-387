@@ -9,6 +9,8 @@ export interface Booking extends Interval {
   topic?: string
 }
 
+const maxTopicLength = 200
+
 export function listUpcomingBookings(
   catalog: ReadonlyMap<string, EventType>,
   calendar: readonly Booking[],
@@ -46,7 +48,6 @@ export function createBooking(
       return
     }
 
-    const topic = request.body.topic
     const interval = slotAt(startsAt, eventType.durationMinutes, now())
     if (!interval) {
       reply.code(400).send({ message: 'Выберите время из расписания' })
@@ -59,8 +60,13 @@ export function createBooking(
       return
     }
 
-    const topicField = topic === undefined ? {} : { topic }
-    calendar.push({ ...interval, eventTypeId, guestName: name, ...topicField })
-    reply.code(201).send({ ...interval, eventType, guestName: name, ...topicField })
+    const topic = request.body.topic?.trim() || undefined
+    if (topic && [...topic].length > maxTopicLength) {
+      reply.code(400).send({ message: `Тема встречи не должна превышать ${maxTopicLength} символов` })
+      return
+    }
+
+    calendar.push({ ...interval, eventTypeId, guestName: name, topic })
+    reply.code(201).send({ ...interval, eventType, guestName: name, topic })
   }
 }

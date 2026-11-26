@@ -12,7 +12,7 @@ model NewBooking {
   startsAt: offsetDateTime;
   @minLength(1)
   guestName: string;
-  @doc("Optional topic of this particular booking.")
+  @doc("Optional topic of this particular booking. Surrounding whitespace is removed; the trimmed value may contain up to 200 characters.")
   topic?: string;
 }
 

@@ -6,6 +6,8 @@ import { formatBookingDate, formatSlotTime } from './bookingTime.ts'
 import { SlotPicker } from './SlotPicker.tsx'
 import './BookingPage.css'
 
+const maxTopicLength = 200
+
 type Availability =
   | { status: 'loading' }
   | { status: 'loaded'; window: SlotWindow }
@@ -55,6 +57,7 @@ export function BookingPage({ eventTypePath }: { eventTypePath: string }) {
   const title = eventType?.title ?? 'Выбор слота'
   const busy = submission.status === 'submitting' || submission.status === 'refreshing'
   const reselectionReason = 'reason' in submission ? submission.reason : undefined
+  const topicTooLong = [...topic.trim()].length > maxTopicLength
   const day = selectedDay && slotWindow?.days.includes(selectedDay) ? selectedDay : slotWindow?.days[0]
 
   function selectDay(day: string) {
@@ -82,12 +85,12 @@ export function BookingPage({ eventTypePath }: { eventTypePath: string }) {
 
   async function confirmBooking(event: SubmitEvent<HTMLFormElement>) {
     event.preventDefault()
-    if (busy || !eventType || !selectedSlot || !guestName.trim()) return
+    if (busy || !eventType || !selectedSlot || !guestName.trim() || topicTooLong) return
 
     setSubmission({ status: 'submitting' })
     try {
       const { data, response } = await createBooking({
-        body: { eventTypeId: eventType.id, startsAt: selectedSlot.startsAt, guestName, ...(topic ? { topic } : {}) },
+        body: { eventTypeId: eventType.id, startsAt: selectedSlot.startsAt, guestName, topic },
       })
       if (data) {
         setSubmission({ status: 'confirmed', booking: data })
@@ -159,11 +162,12 @@ export function BookingPage({ eventTypePath }: { eventTypePath: string }) {
                   <input name="topic" value={topic}
                     onChange={(event) => setTopic(event.target.value)} placeholder="Необязательно" />
                 </label>
-                <button className="booking-link" type="submit" disabled={!selectedSlot || !guestName.trim()}>
+                <button className="booking-link" type="submit" disabled={!selectedSlot || !guestName.trim() || topicTooLong}>
                   {submission.status === 'submitting' ? 'Подтверждаем…' : 'Подтвердить запись'}
                 </button>
               </fieldset>
               <p role="alert">
+                {topicTooLong && `Тема встречи не должна превышать ${maxTopicLength} символов`}
                 {reselectionReason === 'conflict' && 'Это время уже занято. Выберите другой слот'}
                 {reselectionReason === 'expired' && 'Выбранный слот больше недоступен. Выберите другое время.'}
                 {submission.status === 'refresh-failed' && ' Не удалось обновить слоты.'}
