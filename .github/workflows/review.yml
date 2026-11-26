@@ -71,6 +71,7 @@ jobs:
       PR_NUMBER: ${{ github.event.pull_request.number }}
     outputs:
       reason: ${{ steps.outcome.outputs.reason }}
+      retry_at: ${{ steps.model.outputs.retry_at }}
       artifact_id: ${{ steps.save.outputs.artifact-id }}
     steps:
       - uses: actions/checkout@v7
@@ -105,7 +106,7 @@ jobs:
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
           BUN_CONFIG_VERBOSE_FETCH: "1"
           NO_COLOR: "1"
-          OPENCODE_CONFIG_CONTENT: '{"permission":{"*":"deny"},"share":"disabled","small_model":"opencode/deepseek-v4.1-flash-free","provider":{"opencode":{"options":{"headerTimeout":50000,"chunkTimeout":50000,"timeout":55000}}}}'
+          OPENCODE_CONFIG_CONTENT: '{"permission":{"*":"deny"},"share":"disabled","small_model":"opencode/hy4-flash-free","provider":{"opencode":{"options":{"headerTimeout":50000,"chunkTimeout":50000,"timeout":55000}}}}'
         run: |
           set -o pipefail
           umask 077
@@ -117,21 +118,35 @@ jobs:
           {
             timeout --kill-after=10s 420s "$RUNNER_TEMP/reviewer/node_modules/opencode-linux-x64/bin/opencode" run \
               --print-logs --log-level INFO --title "PR #$PR_NUMBER independent review" \
-              --model opencode/deepseek-v4.1-flash-free --variant low --format json \
+              --model opencode/hy4-flash-free --variant none --format json \
               'Используй предоставленные данные и заверши ревью одним текстовым ответом. Укажи отсутствующие материалы, состояние проверок и все подтверждённые дефекты. Ориентир — до 400 слов.' \
               < "$RUNNER_TEMP/review-prompt.txt" 2>&3 |
               jq --unbuffered -Rc 'fromjson? | objects |
                 if .type == "text" then {type,part:{text:(.part.text | strings)}}
                 elif .type == "error" then {type,error:{data:{statusCode:(.error.data.statusCode | numbers // null)}}}
                 elif .type == "step_start" or .type == "step_finish" then {type} else empty end' > events.jsonl
-          } 3>&1 | awk '
+          } 3>&1 | stdbuf -i0 awk '
             /^timestamp=[^ ]+ level=INFO run=[0-9a-f]+ message=bootstrapping / {boot=1}
             /^timestamp=[^ ]+ level=INFO run=[0-9a-f]+ message="llm runtime selected" / {sdk++}
             /^timestamp=[^ ]+ level=ERROR run=[0-9a-f]+ message="stream error" / {errors++}
             /^ *HTTP\/[0-9.]+ [A-Z]+ / {model=($2 == "POST" && $3 ~ /\/chat\/completions$/); posts+=model}
-            model && /^< [1-5][0-9][0-9]( |$)/ {code=$2+0; replies++; limits+=(code==429); model=0}
-            END {printf "OpenCode transport: bootstrap=%d sdk=%d posts=%d replies=%d last_http=%d http_429=%d stream_errors=%d\n",
-                 boot,sdk,posts,replies,code,limits,errors}' > transport.txt || rc=$?
+            /^< [1-5][0-9][0-9]( |$)/ {
+              limited=(model && $2==429); seen_retry=0
+              if (model) {code=$2+0; replies++; limits+=limited; if (limited) retry_at=0}
+              model=0; next
+            }
+            limited && $1=="<" && tolower($2)=="retry-after:" {
+              if (seen_retry++) {retry_at=0; next}
+              if (NF==3 && $3 ~ /^[0-9]+$/ && length($3)<=10) retry_at=systime()+$3
+              else if ($0 ~ /^< [A-Za-z-]+: (Mon|Tue|Wed|Thu|Fri|Sat|Sun), [0-9][0-9] (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) [0-9]{4} [0-9:]{8} GMT$/) {
+                cmd="LC_ALL=C date -u -d \"" $3 " " $4 " " $5 " " $6 " " $7 " GMT\" +%s 2>/dev/null"
+                if ((cmd | getline epoch)==1 && epoch ~ /^[0-9]+$/) retry_at=epoch
+                close(cmd)
+              }
+            }
+            !/^< / {limited=0}
+            END {printf "OpenCode transport: bootstrap=%d sdk=%d posts=%d replies=%d last_http=%d http_429=%d stream_errors=%d retry_at=%.0f\n",
+                 boot,sdk,posts,replies,code,limits,errors,retry_at}' > transport.txt || rc=$?
           tee -a "$GITHUB_STEP_SUMMARY" < transport.txt
           # Only aggregate complete events. A timeout can interrupt the last line.
           metrics=$(jq -Rn '
@@ -154,15 +169,18 @@ jobs:
              jq -e '.http == 429' <<< "$metrics" >/dev/null; then
             echo '::warning::Model provider reported rate limiting.'
           fi
-          if [[ "$rc" == 124 || "$rc" == 137 ]]; then
-            echo "reason=timeout" >> "$GITHUB_OUTPUT"
-            exit 1
+          if [[ "$rc" == 0 ]] && ! jq -es 'any(.[]; .type == "error")' events.jsonl >/dev/null &&
+             jq -ers '[.[] | select(.type == "text") | .part.text] | join("\n") | select(test("\\S")) | .[:55000]' events.jsonl > "$RUNNER_TEMP/review.md"; then
+            exit 0
           fi
-          if [[ "$rc" != 0 ]] || jq -es 'any(.[]; .type == "error")' events.jsonl >/dev/null; then
-            echo "reason=agent_failed" >> "$GITHUB_OUTPUT"
-            exit 1
+          reason=agent_failed
+          if grep -q ' last_http=429 ' transport.txt || jq -e '.http == 429' <<< "$metrics" >/dev/null; then
+            reason=rate_limited
+            sed -nE 's/.* (retry_at=[1-9][0-9]*)$/\1/p' transport.txt >> "$GITHUB_OUTPUT"
+          elif [[ "$rc" == 124 || "$rc" == 137 ]]; then reason=timeout
           fi
-          jq -ers '[.[] | select(.type == "text") | .part.text] | join("\n") | select(test("\\S")) | .[:55000]' events.jsonl > "$RUNNER_TEMP/review.md"
+          echo "reason=$reason" >> "$GITHUB_OUTPUT"
+          exit 1
       - id: save
         name: Save review text for the publisher
         if: steps.budget.outputs.allowed == 'true'
@@ -203,6 +221,7 @@ jobs:
       REVIEW_SHA: ${{ github.event.pull_request.head.sha }}
       REASON: ${{ needs.review.outputs.reason }}
       REVIEW_STATUS: ${{ needs.review.result }}
+      RETRY_AT: ${{ needs.review.outputs.retry_at }}
     steps:
       - name: Retrieve review text
         if: needs.review.result == 'success'
@@ -226,6 +245,11 @@ jobs:
           printf '### Авторевью OpenCode\n\nКоммит `%s` · [Журнал запуска](%s)\n\n' "$REVIEW_SHA" "$logs" > "$report"
           if [[ "$REVIEW_STATUS" == success && "$JOB_STATUS" == success && -s "$RUNNER_TEMP/review/review.md" ]]; then
             cat "$RUNNER_TEMP/review/review.md" >> "$report"
+          elif [[ "$REASON" == rate_limited ]]; then
+            echo 'Провайдер ограничил частоту запросов (HTTP 429, `rate_limited`). Ревью не получено.' >> "$report"
+            if [[ "$RETRY_AT" =~ ^[1-9][0-9]*$ ]]; then
+              date -u -d "@$RETRY_AT" '+Повтор возможен не раньше %Y-%m-%d %H:%M:%S UTC.' >> "$report"
+            fi
           else
             printf 'Нужен человек. Причина `%s`.\n' "${REASON:-infra}" >> "$report"
           fi
