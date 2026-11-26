@@ -1,4 +1,6 @@
 name: OpenCode
+run-name: >-
+  ${{ (github.event.pull_request.number || github.event.issue.pull_request) && format('PR #{0} OpenCode command', github.event.pull_request.number || github.event.issue.number) || format('Issue #{0} OpenCode', github.event.issue.number) }}
 
 on:
   issues:
@@ -18,6 +20,7 @@ jobs:
       pull-requests: read
     outputs:
       allowed: ${{ steps.comment.outputs.allowed }}
+      pr: ${{ steps.comment.outputs.pr }}
     steps:
       - name: Check event, author and pull request
         id: comment
@@ -72,6 +75,7 @@ jobs:
               exit 0
             fi
             [[ "$head_id" == "$repository_id" ]] || exit 0
+            echo "pr=$number" >> "$GITHUB_OUTPUT"
           fi
 
           echo 'allowed=true' >> "$GITHUB_OUTPUT"
@@ -80,12 +84,17 @@ jobs:
     needs: authorize
     if: needs.authorize.outputs.allowed == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
+    outputs:
+      reason: ${{ steps.budget.outputs.reason || steps.execute.outputs.reason }}
     concurrency:
-      group: opencode-${{ github.event.issue.number || github.event.pull_request.number }}
+      group: ${{ needs.authorize.outputs.pr && format('opencode-model-pr-{0}', needs.authorize.outputs.pr) || format('opencode-issue-{0}', github.event.issue.number) }}
       cancel-in-progress: false
+      queue: max
     permissions:
       contents: read
+      actions: read
+      pull-requests: read
       id-token: write
       issues: write
     steps:
@@ -93,13 +102,39 @@ jobs:
         with:
           ref: ${{ github.event.repository.default_branch }}
           persist-credentials: false
+      - name: Check PR budget
+        id: budget
+        if: needs.authorize.outputs.pr
+        env:
+          PR_NUMBER: ${{ needs.authorize.outputs.pr }}
+          GH_TOKEN: ${{ github.token }}
+        run: node .github/scripts/budget.mjs
+      - name: Reserve OpenCode PR attempt
+        if: steps.budget.outputs.allowed == 'true'
+        run: echo 'PR attempt reserved'
+      - name: Stop when PR admission is refused
+        if: needs.authorize.outputs.pr && steps.budget.outputs.allowed != 'true'
+        run: exit 1
       - name: Install OpenCode CLI and refresh the model catalog
         run: |
           npm install --prefix "$RUNNER_TEMP/opencode" --ignore-scripts --no-audit --no-fund opencode-linux-x64@1.19.6
           "$RUNNER_TEMP/opencode/node_modules/opencode-linux-x64/bin/opencode" models --refresh >/dev/null
       - name: Run OpenCode
+        id: execute
         run: |
-          "$RUNNER_TEMP/opencode/node_modules/opencode-linux-x64/bin/opencode" github run
+          if [[ -z "$OPENCODE_API_KEY" ]]; then
+            echo 'reason=infra' >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          status=0
+          timeout -k 15s 9m "$RUNNER_TEMP/opencode/node_modules/opencode-linux-x64/bin/opencode" github run || status=$?
+          case "$status" in
+            0) exit 0 ;;
+            124|137) reason=timeout ;;
+            *) reason=agent_failed ;;
+          esac
+          echo "reason=$reason" >> "$GITHUB_OUTPUT"
+          exit "$status"
         env:
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
           GH_TOKEN: ${{ github.token }}
@@ -109,3 +144,22 @@ jobs:
           OPENCODE_CONFIG_CONTENT: ${{ github.event_name == 'issues' && '{"permission":{"*":"deny","read":{"*":"allow",".git":"deny",".git/*":"deny","*/.git/*":"deny",".env":"deny",".env.*":"deny","*/.env":"deny","*/.env.*":"deny"},"glob":"allow","grep":"allow","skill":"allow","external_directory":"deny"}}' || '' }}
           USE_GITHUB_TOKEN: ${{ github.event_name == 'issues' && 'true' || '' }}
           GITHUB_TOKEN: ${{ github.event_name == 'issues' && github.token || '' }}
+
+  report:
+    if: ${{ failure() && needs.authorize.outputs.pr && needs.opencode.result == 'failure' }}
+    needs: [authorize, opencode]
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Report failed PR request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ needs.authorize.outputs.pr }}
+          REASON: ${{ needs.opencode.outputs.reason || 'infra' }}
+        run: |
+          sha=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq .head.sha)
+          logs="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT"
+          gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" \
+            --body "Нужен человек. Причина — \`$REASON\`. Текущий head SHA — \`$sha\`. [Журнал попытки]($logs)."
