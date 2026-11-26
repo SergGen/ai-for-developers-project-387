@@ -63,6 +63,32 @@ test('the owner sees the topic of an upcoming meeting booked by a guest', async 
   await expect(meeting).toContainText('09:00–09:15 по Москве')
 })
 
+test('the owner sees the topic only on the meeting where the guest entered it', async ({ page, context }) => {
+  await createMeetingType(page)
+
+  const guest = await context.newPage()
+  await bookMeeting(guest, {
+    guestName: 'Мария',
+    slot: '09:00–09:15',
+    topic: 'Подготовить вопросы по проекту',
+  })
+  await bookMeeting(guest, { guestName: 'Иван', slot: '09:15–09:30' })
+
+  await page.getByRole('link', { name: 'Предстоящие встречи' }).click()
+  await expect(page).toHaveURL(/\/admin\/upcoming$/)
+
+  const withTopic = page.getByRole('listitem').filter({ hasText: 'Мария' })
+  await expect(withTopic).toContainText('Знакомство')
+  await expect(withTopic).toContainText('09:00–09:15 по Москве')
+  await expect(withTopic).toContainText('Тема: Подготовить вопросы по проекту')
+
+  const withoutTopic = page.getByRole('listitem').filter({ hasText: 'Иван' })
+  await expect(withoutTopic).toContainText('Знакомство')
+  await expect(withoutTopic).toContainText('09:15–09:30 по Москве')
+  await expect(withoutTopic).not.toContainText('Тема:')
+  await expect(withoutTopic).not.toContainText('Подготовить вопросы по проекту')
+})
+
 test('the owner sees a meeting booked without a topic as before', async ({ page, context }) => {
   await createMeetingType(page)
 
