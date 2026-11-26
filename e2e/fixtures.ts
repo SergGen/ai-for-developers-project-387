@@ -5,9 +5,10 @@ import { withTestServer } from '../server/test-server.ts'
 
 export const test = base.extend<{ appOptions: AppOptions }>({
   appOptions: [{}, { option: true }],
-  baseURL: async ({ appOptions }, provide) => {
+  baseURL: async ({ appOptions }, provide, testInfo) => {
     await withTestServer(appOptions, async (api) => {
       const frontend = await createServer({
+        cacheDir: testInfo.outputPath('vite-cache'),
         server: {
           host: '127.0.0.1',
           port: 0,
