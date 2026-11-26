@@ -1,0 +1,27 @@
+# Руководство для агентов
+
+- Фронтенд React/Vite находится в `src/`, бекенд Fastify и дымовой тест находятся в `server/`.
+- Установка зависимостей и генерация API — `mise run setup`. Команды запуска — `mise run frontend` и `mise run backend` в отдельных терминалах. [Инструкция в README](README.md#использование)
+- Линтер — `mise exec -- npm run lint`. Тесты — `mise exec -- npm test` и `mise exec -- npm run test:e2e`. Перед передачей изменений выполните `mise run check`.
+- Не изменяйте сгенерированный `.github/workflows/hexlet-check.yml` и не переименовывайте репозиторий.
+- В TypeScript используйте отступ в два пробела, одинарные кавычки и опускайте точки с запятой. В JSX используйте двойные кавычки для атрибутов.
+- При изменении бронирования проверяйте пересечения между типами встреч, стыкующиеся интервалы и одновременные запросы. Правила приведены в [сценарии записи](README.md#сценарий-записи-на-звонок).
+- Оформляйте новые коммиты по Conventional Commits. В заголовок коммита реализации добавляйте номер тикета GitHub, например `feat: book an available slot (#10)`.
+- Меняйте контракт в `api/` и запускайте `mise exec -- npm run generate`. Не правьте вручную `generated/openapi.json` и `generated/sdk/` (клиент SDK и типы обработчиков Fastify).
+
+## Agent skills
+
+Проектные скиллы Codex и OpenCode находятся в `.agents/skills/`.
+Вызывайте `setup-matt-pocock-skills`, `wayfinder` и `implement-spec` явно по имени или ссылкой на их `SKILL.md`. Эти скиллы настроены на ручной вызов.
+
+### Issue tracker
+
+Задачи и спецификации ведём в GitHub Issues. См. [настройки трекера](docs/agents/issue-tracker.md).
+
+### Triage labels
+
+Для разбора задач используйте [метки проекта](docs/agents/triage-labels.md).
+
+### Domain docs
+
+Перед работой с предметной областью прочитайте [правила работы со словарём и ADR](docs/agents/domain.md).
