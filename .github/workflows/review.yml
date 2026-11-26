@@ -72,6 +72,8 @@ jobs:
     outputs:
       reason: ${{ steps.outcome.outputs.reason }}
       retry_at: ${{ steps.model.outputs.retry_at }}
+      provider_error: ${{ steps.model.outputs.provider_error }}
+      http_status: ${{ steps.model.outputs.http_status }}
       artifact_id: ${{ steps.save.outputs.artifact-id }}
     steps:
       - uses: actions/checkout@v7
@@ -97,90 +99,89 @@ jobs:
           MODEL_KEY_PRESENT: ${{ secrets.OPENCODE_API_KEY != '' }}
         run: |
           [[ "$MODEL_KEY_PRESENT" == true || "$MODEL_KEY_PRESENT" == True ]]
-          npm install --prefix "$RUNNER_TEMP/reviewer" --ignore-scripts --no-audit --no-fund opencode-linux-x64@1.19.6
-          "$RUNNER_TEMP/reviewer/node_modules/opencode-linux-x64/bin/opencode" models --refresh > /dev/null
+          npm install --prefix "$RUNNER_TEMP/reviewer" --ignore-scripts --no-audit --no-fund @opencode/cli-linux-x64@2.4.2
+          "$RUNNER_TEMP/reviewer/node_modules/@opencode/cli-linux-x64/bin/opencode" --version
       - id: model
         name: Review in an isolated session
         if: steps.budget.outputs.allowed == 'true'
+        shell: python
         env:
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
-          BUN_CONFIG_VERBOSE_FETCH: "1"
-          NO_COLOR: "1"
-          OPENCODE_CONFIG_CONTENT: '{"permission":{"*":"deny"},"share":"disabled","small_model":"opencode/hy4-flash-free","provider":{"opencode":{"options":{"headerTimeout":50000,"chunkTimeout":50000,"timeout":55000}}}}'
         run: |
-          set -o pipefail
-          umask 077
-          mkdir "$RUNNER_TEMP/review-session"
-          cd "$RUNNER_TEMP/review-session"
-          started=$SECONDS
-          rc=0
-          # Keep raw headers, provider errors, and reasoning off disk. Both filters finish before reporting.
-          {
-            timeout --kill-after=10s 420s "$RUNNER_TEMP/reviewer/node_modules/opencode-linux-x64/bin/opencode" run \
-              --print-logs --log-level INFO --title "PR #$PR_NUMBER independent review" \
-              --model opencode/hy4-flash-free --variant none --format json \
-              'Используй предоставленные данные и заверши ревью одним текстовым ответом. Укажи отсутствующие материалы, состояние проверок и все подтверждённые дефекты. Ориентир — до 400 слов.' \
-              < "$RUNNER_TEMP/review-prompt.txt" 2>&3 |
-              jq --unbuffered -Rc 'fromjson? | objects |
-                if .type == "text" then {type,part:{text:(.part.text | strings)}}
-                elif .type == "error" then {type,error:{data:{statusCode:(.error.data.statusCode | numbers // null)}}}
-                elif .type == "step_start" or .type == "step_finish" then {type} else empty end' > events.jsonl
-          } 3>&1 | stdbuf -i0 awk '
-            /^timestamp=[^ ]+ level=INFO run=[0-9a-f]+ message=bootstrapping / {boot=1}
-            /^timestamp=[^ ]+ level=INFO run=[0-9a-f]+ message="llm runtime selected" / {sdk++}
-            /^timestamp=[^ ]+ level=ERROR run=[0-9a-f]+ message="stream error" / {errors++}
-            /^ *HTTP\/[0-9.]+ [A-Z]+ / {model=($2 == "POST" && $3 ~ /\/chat\/completions$/); posts+=model}
-            /^< [1-5][0-9][0-9]( |$)/ {
-              limited=(model && $2==429); seen_retry=0
-              if (model) {code=$2+0; replies++; limits+=limited; if (limited) retry_at=0}
-              model=0; next
-            }
-            limited && $1=="<" && tolower($2)=="retry-after:" {
-              if (seen_retry++) {retry_at=0; next}
-              if (NF==3 && $3 ~ /^[0-9]+$/ && length($3)<=10) retry_at=systime()+$3
-              else if ($0 ~ /^< [A-Za-z-]+: (Mon|Tue|Wed|Thu|Fri|Sat|Sun), [0-9][0-9] (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) [0-9]{4} [0-9:]{8} GMT$/) {
-                cmd="LC_ALL=C date -u -d \"" $3 " " $4 " " $5 " " $6 " " $7 " GMT\" +%s 2>/dev/null"
-                if ((cmd | getline epoch)==1 && epoch ~ /^[0-9]+$/) retry_at=epoch
-                close(cmd)
-              }
-            }
-            !/^< / {limited=0}
-            END {printf "OpenCode transport: bootstrap=%d sdk=%d posts=%d replies=%d last_http=%d http_429=%d stream_errors=%d retry_at=%.0f\n",
-                 boot,sdk,posts,replies,code,limits,errors,retry_at}' > transport.txt || rc=$?
-          tee -a "$GITHUB_STEP_SUMMARY" < transport.txt
-          # Only aggregate complete events. A timeout can interrupt the last line.
-          metrics=$(jq -Rn '
-            reduce inputs as $line ({events:0, started:0, finished:0, texts:0, errors:0, http:null};
-              (try ($line | fromjson) catch null) as $e |
-              if ($e | type) != "object" then . else
-                .events += 1 |
-                if $e.type == "step_start" then .started += 1
-                elif $e.type == "step_finish" then .finished += 1
-                elif $e.type == "text" then .texts += 1
-                elif $e.type == "error" then
-                  .errors += 1 |
-                  ($e.error.data.statusCode // null) as $status |
-                  if ($status | type) == "number" and $status >= 400 and $status <= 599 then .http = $status else . end
-                else . end
-              end) | @json' -r events.jsonl)
-          printf 'OpenCode: %ss, input %s bytes, exit %s, events %s\n' \
-            "$((SECONDS - started))" "$(wc -c < "$RUNNER_TEMP/review-prompt.txt")" "$rc" "$metrics" | tee -a "$GITHUB_STEP_SUMMARY"
-          if grep -Eq 'http_429=[1-9]' transport.txt ||
-             jq -e '.http == 429' <<< "$metrics" >/dev/null; then
-            echo '::warning::Model provider reported rate limiting.'
-          fi
-          if [[ "$rc" == 0 ]] && ! jq -es 'any(.[]; .type == "error")' events.jsonl >/dev/null &&
-             jq -ers '[.[] | select(.type == "text") | .part.text] | join("\n") | select(test("\\S")) | .[:55000]' events.jsonl > "$RUNNER_TEMP/review.md"; then
-            exit 0
-          fi
-          reason=agent_failed
-          if grep -q ' last_http=429 ' transport.txt || jq -e '.http == 429' <<< "$metrics" >/dev/null; then
-            reason=rate_limited
-            sed -nE 's/.* (retry_at=[1-9][0-9]*)$/\1/p' transport.txt >> "$GITHUB_OUTPUT"
-          elif [[ "$rc" == 124 || "$rc" == 137 ]]; then reason=timeout
-          fi
-          echo "reason=$reason" >> "$GITHUB_OUTPUT"
-          exit 1
+          import json
+          import os
+          import subprocess
+          import tempfile
+          import time
+          from pathlib import Path
+
+          root = Path(os.environ["RUNNER_TEMP"])
+          binary = root / "reviewer/node_modules/@opencode/cli-linux-x64/bin/opencode"
+          model = "opencode/hy4-flash-free#none"
+          deny_all = {"action": "*", "resource": "*", "effect": "deny"}
+          config = {
+              "update": "disable", "share": "disabled", "snapshots": False,
+              "permissions": [deny_all],
+              "policies": [{**deny_all, "action": action} for action in ("tool.use", "mcp.use", "plugin.use")],
+              "agents": {"title": {"model": model}},
+              "providers": {"opencode": {"settings": {"headerTimeout": 50000, "chunkTimeout": 50000, "timeout": 55000}}},
+          }
+          counts = {"step_start": 0, "step_finish": 0, "text": 0, "retry": 0, "error": 0}
+          status, retry_at, category = None, None, ""
+          report = []
+          started = time.monotonic()
+          with tempfile.TemporaryDirectory(dir=root) as tmp, (root / "review-prompt.txt").open("rb") as prompt:
+              home = Path(tmp) / "home"
+              home.mkdir()
+              # The private server gets only this config and this provider key.
+              env = {"HOME": str(home), "PATH": os.defpath, "LANG": "C.UTF-8", "CI": "true",
+                     "OPENCODE_CONFIG_PROJECT_DISABLE": "1", "OPENCODE_DISABLE_MODELS_FETCH": "1",
+                     "OPENCODE_CONFIG_CONTENT": json.dumps(config), "OPENCODE_API_KEY": os.environ["OPENCODE_API_KEY"]}
+              command = ["timeout", "--kill-after=10s", "420s", binary, "run", "--standalone", "--log-level", "none",
+                         "--title", "PR #" + os.environ["PR_NUMBER"] + " independent review", "--model", model,
+                         "--format", "json", "Используй предоставленные данные и заверши ревью одним текстовым ответом. "
+                         "Укажи отсутствующие материалы, состояние проверок и подтверждённые дефекты. Ориентир — до 400 слов."]
+              with subprocess.Popen(command, cwd=tmp, env=env, stdin=prompt, stdout=subprocess.PIPE,
+                                    stderr=subprocess.DEVNULL) as process:
+                  for line in process.stdout:
+                      try:
+                          event = json.loads(line)
+                      except (ValueError, RecursionError):
+                          continue
+                      kind = event.get("type") if isinstance(event, dict) else None
+                      if kind not in counts:
+                          continue
+                      counts[kind] += 1
+                      if kind == "text":
+                          report.append(event["part"]["text"])
+                      if kind in ("retry", "error"):
+                          error = event["error"]
+                          code, delay, timestamp = error.get("status"), error.get("retryAfterMs"), event.get("timestamp")
+                          status = code if type(code) is int and 100 <= code <= 599 else None
+                          retry_at = ((timestamp + delay + 999) // 1000 if status == 429 and type(delay) is int
+                                      and delay >= 0 and type(timestamp) is int else None)
+                          category = error.get("type", "")
+                  result = process.wait()
+
+          summary = {**counts, "seconds": round(time.monotonic() - started), "input_bytes": (root / "review-prompt.txt").stat().st_size,
+                     "exit": result, "last_error_http": status, "retry_at": retry_at}
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as output:
+              print("OpenCode v2 " + json.dumps(summary), file=output)
+          body = "\n".join(report).strip()
+          if result == 0 and body and not counts["error"]:
+              (root / "review.md").write_text(body[:55000], encoding="utf-8")
+          else:
+              reason = "rate_limited" if status == 429 else "timeout" if result in (124, 137) else "agent_failed"
+              with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+                  print("reason=" + reason, file=output)
+                  if status:
+                      print("http_status=" + str(status), file=output)
+                  if retry_at:
+                      print("retry_at=" + str(retry_at), file=output)
+                  if category in ("provider.auth", "provider.free-limit", "provider.quota", "provider.invalid-request",
+                                  "provider.rate-limit", "provider.no-route"):
+                      print("provider_error=" + category, file=output)
+              raise SystemExit(1)
       - id: save
         name: Save review text for the publisher
         if: steps.budget.outputs.allowed == 'true'
@@ -222,6 +223,8 @@ jobs:
       REASON: ${{ needs.review.outputs.reason }}
       REVIEW_STATUS: ${{ needs.review.result }}
       RETRY_AT: ${{ needs.review.outputs.retry_at }}
+      HTTP_STATUS: ${{ needs.review.outputs.http_status }}
+      PROVIDER_ERROR: ${{ needs.review.outputs.provider_error }}
     steps:
       - name: Retrieve review text
         if: needs.review.result == 'success'
@@ -247,10 +250,14 @@ jobs:
             cat "$RUNNER_TEMP/review/review.md" >> "$report"
           elif [[ "$REASON" == rate_limited ]]; then
             echo 'Провайдер ограничил частоту запросов (HTTP 429, `rate_limited`). Ревью не получено.' >> "$report"
-            if [[ "$RETRY_AT" =~ ^[1-9][0-9]*$ ]]; then
-              date -u -d "@$RETRY_AT" '+Повтор возможен не раньше %Y-%m-%d %H:%M:%S UTC.' >> "$report"
+            if [[ "$RETRY_AT" =~ ^[1-9][0-9]*$ ]] && when=$(date -u -d "@$RETRY_AT" '+%Y-%m-%d %H:%M:%S UTC' 2>/dev/null); then
+              printf 'Повтор возможен не раньше %s.\n' "$when" >> "$report"
             fi
           else
             printf 'Нужен человек. Причина `%s`.\n' "${REASON:-infra}" >> "$report"
+            if [[ "$HTTP_STATUS" =~ ^[1-5][0-9][0-9]$ ]]; then printf 'Провайдер вернул HTTP %s.\n' "$HTTP_STATUS" >> "$report"; fi
+          fi
+          if [[ -n "$PROVIDER_ERROR" ]]; then
+            printf 'OpenCode сообщил об ошибке `%s`.\n' "$PROVIDER_ERROR" >> "$report"
           fi
           gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --body-file "$report"
