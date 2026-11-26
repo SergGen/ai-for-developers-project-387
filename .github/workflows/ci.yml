@@ -22,7 +22,7 @@ jobs:
           version: '2026.11.14'
       - run: mise run setup
       - name: Test the PR attempt budget
-        run: mise exec -- node --test .github/scripts/budget.test.mjs
+        run: mise exec -- node --test .github/scripts/budget-check.mjs
       - name: Save freshly generated API for comparison
         run: |
           test -s generated/openapi.json
