@@ -103,17 +103,36 @@ jobs:
         if: steps.budget.outputs.allowed == 'true'
         env:
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
-          OPENCODE_CONFIG_CONTENT: '{"permission":{"*":"deny"},"share":"disabled","small_model":"opencode/deepseek-v4.1-flash-free"}'
+          BUN_CONFIG_VERBOSE_FETCH: "1"
+          NO_COLOR: "1"
+          OPENCODE_CONFIG_CONTENT: '{"permission":{"*":"deny"},"share":"disabled","small_model":"opencode/deepseek-v4.1-flash-free","provider":{"opencode":{"options":{"headerTimeout":50000,"chunkTimeout":50000,"timeout":55000}}}}'
         run: |
+          set -o pipefail
+          umask 077
           mkdir "$RUNNER_TEMP/review-session"
           cd "$RUNNER_TEMP/review-session"
           started=$SECONDS
           rc=0
-          timeout --kill-after=10s 420s "$RUNNER_TEMP/reviewer/node_modules/opencode-linux-x64/bin/opencode" run \
-            --title "PR #$PR_NUMBER independent review" \
-            --model opencode/deepseek-v4.1-flash-free --variant low --format json \
-            'Используй предоставленные данные и заверши ревью одним текстовым ответом. Укажи отсутствующие материалы, состояние проверок и все подтверждённые дефекты. Ориентир — до 400 слов.' \
-            < "$RUNNER_TEMP/review-prompt.txt" > events.jsonl 2> cli.stderr || rc=$?
+          # Keep raw headers, provider errors, and reasoning off disk. Both filters finish before reporting.
+          {
+            timeout --kill-after=10s 420s "$RUNNER_TEMP/reviewer/node_modules/opencode-linux-x64/bin/opencode" run \
+              --print-logs --log-level INFO --title "PR #$PR_NUMBER independent review" \
+              --model opencode/deepseek-v4.1-flash-free --variant low --format json \
+              'Используй предоставленные данные и заверши ревью одним текстовым ответом. Укажи отсутствующие материалы, состояние проверок и все подтверждённые дефекты. Ориентир — до 400 слов.' \
+              < "$RUNNER_TEMP/review-prompt.txt" 2>&3 |
+              jq --unbuffered -Rc 'fromjson? | objects |
+                if .type == "text" then {type,part:{text:(.part.text | strings)}}
+                elif .type == "error" then {type,error:{data:{statusCode:(.error.data.statusCode | numbers // null)}}}
+                elif .type == "step_start" or .type == "step_finish" then {type} else empty end' > events.jsonl
+          } 3>&1 | awk '
+            /^timestamp=[^ ]+ level=INFO run=[0-9a-f]+ message=bootstrapping / {boot=1}
+            /^timestamp=[^ ]+ level=INFO run=[0-9a-f]+ message="llm runtime selected" / {sdk++}
+            /^timestamp=[^ ]+ level=ERROR run=[0-9a-f]+ message="stream error" / {errors++}
+            /^ *HTTP\/[0-9.]+ [A-Z]+ / {model=($2 == "POST" && $3 ~ /\/chat\/completions$/); posts+=model}
+            model && /^< [1-5][0-9][0-9]( |$)/ {code=$2+0; replies++; limits+=(code==429); model=0}
+            END {printf "OpenCode transport: bootstrap=%d sdk=%d posts=%d replies=%d last_http=%d http_429=%d stream_errors=%d\n",
+                 boot,sdk,posts,replies,code,limits,errors}' > transport.txt || rc=$?
+          tee -a "$GITHUB_STEP_SUMMARY" < transport.txt
           # Only aggregate complete events. A timeout can interrupt the last line.
           metrics=$(jq -Rn '
             reduce inputs as $line ({events:0, started:0, finished:0, texts:0, errors:0, http:null};
@@ -131,7 +150,7 @@ jobs:
               end) | @json' -r events.jsonl)
           printf 'OpenCode: %ss, input %s bytes, exit %s, events %s\n' \
             "$((SECONDS - started))" "$(wc -c < "$RUNNER_TEMP/review-prompt.txt")" "$rc" "$metrics" | tee -a "$GITHUB_STEP_SUMMARY"
-          if grep -Eqi 'too many requests|rate.limit exceeded|status(code)?["=: ]+429|HTTP[^ ]* +429' cli.stderr ||
+          if grep -Eq 'http_429=[1-9]' transport.txt ||
              jq -e '.http == 429' <<< "$metrics" >/dev/null; then
             echo '::warning::Model provider reported rate limiting.'
           fi
