@@ -107,17 +107,39 @@ jobs:
         run: |
           mkdir "$RUNNER_TEMP/review-session"
           cd "$RUNNER_TEMP/review-session"
+          started=$SECONDS
           rc=0
           timeout --kill-after=10s 420s "$RUNNER_TEMP/reviewer/node_modules/opencode-linux-x64/bin/opencode" run \
-            --model opencode/deepseek-v4.1-flash-free --format json < "$RUNNER_TEMP/review-prompt.txt" > events.jsonl || rc=$?
+            --title "PR #$PR_NUMBER independent review" \
+            --model opencode/deepseek-v4.1-flash-free --variant low --format json \
+            'Используй предоставленные данные и заверши ревью одним текстовым ответом. Укажи отсутствующие материалы, состояние проверок и все подтверждённые дефекты. Ориентир — до 400 слов.' \
+            < "$RUNNER_TEMP/review-prompt.txt" > events.jsonl 2> cli.stderr || rc=$?
+          # Only aggregate complete events. A timeout can interrupt the last line.
+          metrics=$(jq -Rn '
+            reduce inputs as $line ({events:0, started:0, finished:0, texts:0, errors:0, http:null};
+              (try ($line | fromjson) catch null) as $e |
+              if ($e | type) != "object" then . else
+                .events += 1 |
+                if $e.type == "step_start" then .started += 1
+                elif $e.type == "step_finish" then .finished += 1
+                elif $e.type == "text" then .texts += 1
+                elif $e.type == "error" then
+                  .errors += 1 |
+                  ($e.error.data.statusCode // null) as $status |
+                  if ($status | type) == "number" and $status >= 400 and $status <= 599 then .http = $status else . end
+                else . end
+              end) | @json' -r events.jsonl)
+          printf 'OpenCode: %ss, input %s bytes, exit %s, events %s\n' \
+            "$((SECONDS - started))" "$(wc -c < "$RUNNER_TEMP/review-prompt.txt")" "$rc" "$metrics" | tee -a "$GITHUB_STEP_SUMMARY"
+          if grep -Eqi 'too many requests|rate.limit exceeded|status(code)?["=: ]+429|HTTP[^ ]* +429' cli.stderr ||
+             jq -e '.http == 429' <<< "$metrics" >/dev/null; then
+            echo '::warning::Model provider reported rate limiting.'
+          fi
           if [[ "$rc" == 124 || "$rc" == 137 ]]; then
             echo "reason=timeout" >> "$GITHUB_OUTPUT"
             exit 1
           fi
           if [[ "$rc" != 0 ]] || jq -es 'any(.[]; .type == "error")' events.jsonl >/dev/null; then
-            if grep -Eqi '(^|[^0-9])429([^0-9]|$)|rate.limit|too many requests' events.jsonl; then
-              echo '::warning::Model provider reported rate limiting (HTTP 429).'
-            fi
             echo "reason=agent_failed" >> "$GITHUB_OUTPUT"
             exit 1
           fi
