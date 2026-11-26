@@ -12,4 +12,4 @@ The skills speak in terms of five canonical triage roles. This file maps those r
 
 When a skill mentions a role (e.g. "apply the AFK-ready triage label"), use the corresponding label string from this table.
 
-Edit the "Label in our tracker" column to match whatever vocabulary you actually use.
+GitHub Actions skips automatic triage on issues labeled `ready-for-agent`. When publishing a specification with `to-spec` or a ticket with `to-tickets`, pass `--label ready-for-agent` to `gh issue create` so the issue already has the label in its opening event.
