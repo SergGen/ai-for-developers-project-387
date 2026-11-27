@@ -63,7 +63,7 @@ jobs:
         if: steps.saved.outputs.id == '' && env.SOURCE_RUN == ''
         run: |
           case "$SCENARIO" in
-            training-baseline) sample=training-finding ;;
+            training-baseline) sample=training-clean ;;
             training-provider-failure) sample=training-finding ;;
             *) sample="$SCENARIO" ;;
           esac

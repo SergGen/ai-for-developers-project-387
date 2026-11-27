@@ -74,9 +74,12 @@ def wait_for_calendar(server, url):
             raise RuntimeError(f"Calendar server exited before readiness (code {server.returncode}).")
         try:
             with urlopen(url + "health", timeout=2) as response:
-                if json.load(response).get("status") != "ok":
+                health = json.load(response)
+                if not isinstance(health, dict) or health.get("status") != "ok":
                     raise RuntimeError("Calendar /health returned an unexpected response.")
             break
+        except ValueError as error:
+            raise RuntimeError("Calendar /health did not return JSON.") from error
         except URLError:
             time.sleep(0.25)
     else:
