@@ -23,6 +23,8 @@ jobs:
       - run: mise run setup
       - name: Test the PR attempt budget
         run: mise exec -- node --test .github/scripts/budget-check.mjs
+      - name: Test the scheduled audit
+        run: python3 -m unittest discover -s .github/scripts/audit -p 'test_*.py'
       - name: Save freshly generated API for comparison
         run: |
           test -s generated/openapi.json

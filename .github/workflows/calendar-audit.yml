@@ -1,0 +1,167 @@
+name: Calendar Lighthouse audit
+run-name: 'Calendar audit · ${{ inputs.scenario || ''live'' }} · ${{ inputs.source_run || ''fresh'' }}'
+
+on:
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+    inputs:
+      scenario:
+        description: 'live measures main. training modes exercise labelled examples.'
+        type: choice
+        options: [live, training-baseline, training-finding, training-clean, training-no-data, training-provider-failure]
+        default: live
+      source_run:
+        description: 'Replay an original report from this workflow (run ID, leave scenario at live)'
+        type: string
+        required: false
+
+permissions: {}
+concurrency:
+  group: calendar-lighthouse-audit
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  collect:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    permissions:
+      contents: read
+      actions: read
+    env:
+      SCENARIO: ${{ inputs.scenario || 'live' }}
+      SOURCE_RUN: ${{ inputs.source_run }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Find source already preserved by an earlier attempt
+        id: saved
+        if: github.run_attempt != '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          artifact=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts?name=calendar-audit-report" --jq '.artifacts[] | select(.expired == false) | .id')
+          echo "id=$artifact" >> "$GITHUB_OUTPUT"
+      - uses: actions/download-artifact@v4
+        if: steps.saved.outputs.id != ''
+        with:
+          artifact-ids: ${{ steps.saved.outputs.id }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/report
+      - uses: jdx/mise-action@v5
+        if: steps.saved.outputs.id == '' && env.SCENARIO == 'live' && env.SOURCE_RUN == ''
+        with:
+          version: '2026.11.14'
+      - name: Measure the guest page or generate a training case
+        if: steps.saved.outputs.id == '' && env.SOURCE_RUN == ''
+        run: |
+          case "$SCENARIO" in
+            training-baseline) sample=training-finding ;;
+            training-provider-failure) sample=training-finding ;;
+            *) sample="$SCENARIO" ;;
+          esac
+          python3 .github/scripts/audit/collect.py "$RUNNER_TEMP/report" "$sample"
+      - name: Verify original run and locate its report
+        id: original
+        if: steps.saved.outputs.id == '' && env.SOURCE_RUN != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          [[ "$SCENARIO" == live && "$SOURCE_RUN" =~ ^[1-9][0-9]*$ ]]
+          repo="repos/$GITHUB_REPOSITORY"
+          workflow_id=$(gh api "$repo/actions/workflows/calendar-audit.yml" --jq .id)
+          gh api "$repo/actions/runs/$SOURCE_RUN" | jq -e --argjson wf "$workflow_id" \
+            '.workflow_id == $wf and .head_branch == "main" and (.event == "workflow_dispatch" or .event == "schedule")' >/dev/null
+          artifact=$(gh api "$repo/actions/runs/$SOURCE_RUN/artifacts?name=calendar-audit-report" --jq '.artifacts[] | select(.expired == false) | .id')
+          [[ "$artifact" =~ ^[1-9][0-9]*$ ]]
+          echo "artifact=$artifact" >> "$GITHUB_OUTPUT"
+      - uses: actions/download-artifact@v4
+        if: steps.saved.outputs.id == '' && env.SOURCE_RUN != ''
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.source_run }}
+          artifact-ids: ${{ steps.original.outputs.artifact }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/report
+      - name: Check replay provenance
+        if: env.SOURCE_RUN != ''
+        run: jq -e --arg run "$SOURCE_RUN" '.source_run == $run' "$RUNNER_TEMP/report/meta.json"
+      - name: Preserve source before calling OpenCode
+        if: steps.saved.outputs.id == ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: calendar-audit-report
+          path: ${{ runner.temp }}/report/
+          if-no-files-found: error
+          retention-days: 30
+      - name: Record measurement status
+        run: |
+          jq '{mode,status,reason,profile,path,sha,source_run,report_id}' "$RUNNER_TEMP/report/meta.json" >> "$GITHUB_STEP_SUMMARY"
+
+  analyze:
+    needs: collect
+    runs-on: ubuntu-latest
+    timeout-minutes: 9
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: calendar-audit-report
+          path: ${{ runner.temp }}/report
+      - id: input
+        run: echo "status=$(jq -er .status "$RUNNER_TEMP/report/meta.json")" >> "$GITHUB_OUTPUT"
+      - name: Exercise provider failure on training data
+        if: inputs.scenario == 'training-provider-failure'
+        run: |
+          echo 'Учебный отказ провайдера. Анализ не завершён. Исходный отчёт сохранён для повтора.' >> "$GITHUB_STEP_SUMMARY"
+          exit 1
+      - name: Install pinned OpenCode
+        if: steps.input.outputs.status == 'ok'
+        run: npm install --prefix "$RUNNER_TEMP/reviewer" --ignore-scripts --no-audit --no-fund @opencode/cli-linux-x64@2.4.2
+      - name: Analyze measured data
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          OPENCODE_BIN: ${{ runner.temp }}/reviewer/node_modules/@opencode/cli-linux-x64/bin/opencode
+        run: python3 .github/scripts/audit/analyze.py "$RUNNER_TEMP/report"
+      - if: failure()
+        run: echo 'Анализ не завершён. Для повтора укажите ID исходного прогона в source_run.' >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: calendar-audit-analysis
+          path: ${{ runner.temp }}/report/analysis.json
+          if-no-files-found: error
+          overwrite: true
+
+  publish:
+    needs: analyze
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: calendar-audit-report
+          path: ${{ runner.temp }}/report
+      - uses: actions/download-artifact@v4
+        with:
+          name: calendar-audit-analysis
+          path: ${{ runner.temp }}/report
+      - name: Publish verified result
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .github/scripts/audit/publish.py "$RUNNER_TEMP/report" | tee -a "$GITHUB_STEP_SUMMARY"
