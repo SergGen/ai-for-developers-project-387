@@ -71,6 +71,9 @@ jobs:
       PR_NUMBER: ${{ github.event.pull_request.number }}
     outputs:
       reason: ${{ steps.outcome.outputs.reason }}
+      retry_at: ${{ steps.model.outputs.retry_at }}
+      provider_error: ${{ steps.model.outputs.provider_error }}
+      http_status: ${{ steps.model.outputs.http_status }}
       artifact_id: ${{ steps.save.outputs.artifact-id }}
     steps:
       - uses: actions/checkout@v7
@@ -93,35 +96,92 @@ jobs:
       - name: Install reviewer
         if: steps.budget.outputs.allowed == 'true'
         env:
-          MODEL_KEY_PRESENT: ${{ secrets.OPENCODE_API_KEY != '' }}
+          MODEL_KEY_PRESENT: ${{ secrets.OPENROUTER_API_KEY != '' }}
         run: |
           [[ "$MODEL_KEY_PRESENT" == true || "$MODEL_KEY_PRESENT" == True ]]
-          npm install --prefix "$RUNNER_TEMP/reviewer" --ignore-scripts --no-audit --no-fund opencode-linux-x64@1.19.6
-          "$RUNNER_TEMP/reviewer/node_modules/opencode-linux-x64/bin/opencode" models --refresh > /dev/null
+          npm install --prefix "$RUNNER_TEMP/reviewer" --ignore-scripts --no-audit --no-fund @opencode/cli-linux-x64@2.4.2
+          "$RUNNER_TEMP/reviewer/node_modules/@opencode/cli-linux-x64/bin/opencode" --version
       - id: model
         name: Review in an isolated session
         if: steps.budget.outputs.allowed == 'true'
+        shell: python
         env:
-          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
-          OPENCODE_CONFIG_CONTENT: '{"permission":{"*":"deny"},"share":"disabled","small_model":"opencode/deepseek-v4.1-flash-free"}'
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
         run: |
-          mkdir "$RUNNER_TEMP/review-session"
-          cd "$RUNNER_TEMP/review-session"
-          rc=0
-          timeout --kill-after=10s 420s "$RUNNER_TEMP/reviewer/node_modules/opencode-linux-x64/bin/opencode" run \
-            --model opencode/deepseek-v4.1-flash-free --format json < "$RUNNER_TEMP/review-prompt.txt" > events.jsonl || rc=$?
-          if [[ "$rc" == 124 || "$rc" == 137 ]]; then
-            echo "reason=timeout" >> "$GITHUB_OUTPUT"
-            exit 1
-          fi
-          if [[ "$rc" != 0 ]] || jq -es 'any(.[]; .type == "error")' events.jsonl >/dev/null; then
-            if grep -Eqi '(^|[^0-9])429([^0-9]|$)|rate.limit|too many requests' events.jsonl; then
-              echo '::warning::Model provider reported rate limiting (HTTP 429).'
-            fi
-            echo "reason=agent_failed" >> "$GITHUB_OUTPUT"
-            exit 1
-          fi
-          jq -ers '[.[] | select(.type == "text") | .part.text] | join("\n") | select(test("\\S")) | .[:55000]' events.jsonl > "$RUNNER_TEMP/review.md"
+          import json
+          import os
+          import subprocess
+          import tempfile
+          import time
+          from pathlib import Path
+
+          root = Path(os.environ["RUNNER_TEMP"])
+          binary = root / "reviewer/node_modules/@opencode/cli-linux-x64/bin/opencode"
+          model = "openrouter/openrouter/free"
+          deny_all = {"action": "*", "resource": "*", "effect": "deny"}
+          config = {
+              "update": "disable", "share": "disabled", "snapshots": False,
+              "permissions": [deny_all],
+              "policies": [{**deny_all, "action": action} for action in ("tool.use", "mcp.use", "plugin.use")],
+              "agents": {"title": {"model": model}},
+              "providers": {"openrouter": {"settings": {"headerTimeout": 50000, "chunkTimeout": 50000, "timeout": 55000}}},
+          }
+          counts = {"step_start": 0, "step_finish": 0, "text": 0, "retry": 0, "error": 0}
+          status, retry_at, category = None, None, ""
+          report = []
+          started = time.monotonic()
+          with tempfile.TemporaryDirectory(dir=root) as tmp, (root / "review-prompt.txt").open("rb") as prompt:
+              home = Path(tmp) / "home"
+              home.mkdir()
+              # The private server gets only this config and this provider key.
+              env = {"HOME": str(home), "PATH": os.defpath, "LANG": "C.UTF-8", "CI": "true",
+                     "OPENCODE_CONFIG_PROJECT_DISABLE": "1", "OPENCODE_DISABLE_MODELS_FETCH": "1",
+                     "OPENCODE_CONFIG_CONTENT": json.dumps(config), "OPENROUTER_API_KEY": os.environ["OPENROUTER_API_KEY"]}
+              command = ["timeout", "--kill-after=10s", "420s", binary, "run", "--standalone", "--log-level", "none",
+                         "--title", "PR #" + os.environ["PR_NUMBER"] + " independent review", "--model", model,
+                         "--format", "json", "Используй предоставленные данные и заверши ревью одним текстовым ответом. "
+                         "Укажи отсутствующие материалы, состояние проверок и подтверждённые дефекты. Ориентир — до 400 слов."]
+              with subprocess.Popen(command, cwd=tmp, env=env, stdin=prompt, stdout=subprocess.PIPE,
+                                    stderr=subprocess.DEVNULL) as process:
+                  for line in process.stdout:
+                      try:
+                          event = json.loads(line)
+                      except (ValueError, RecursionError):
+                          continue
+                      kind = event.get("type") if isinstance(event, dict) else None
+                      if kind not in counts:
+                          continue
+                      counts[kind] += 1
+                      if kind == "text":
+                          report.append(event["part"]["text"])
+                      if kind in ("retry", "error"):
+                          error = event["error"]
+                          code, delay, timestamp = error.get("status"), error.get("retryAfterMs"), event.get("timestamp")
+                          status = code if type(code) is int and 100 <= code <= 599 else None
+                          retry_at = ((timestamp + delay + 999) // 1000 if status == 429 and type(delay) is int
+                                      and delay >= 0 and type(timestamp) is int else None)
+                          category = error.get("type", "")
+                  result = process.wait()
+
+          summary = {**counts, "seconds": round(time.monotonic() - started), "input_bytes": (root / "review-prompt.txt").stat().st_size,
+                     "exit": result, "last_error_http": status, "retry_at": retry_at}
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as output:
+              print("OpenCode v2 " + json.dumps(summary), file=output)
+          body = "\n".join(report).strip()
+          if result == 0 and body and not counts["error"]:
+              (root / "review.md").write_text(body[:55000], encoding="utf-8")
+          else:
+              reason = "rate_limited" if status == 429 else "timeout" if result in (124, 137) else "agent_failed"
+              with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+                  print("reason=" + reason, file=output)
+                  if status:
+                      print("http_status=" + str(status), file=output)
+                  if retry_at:
+                      print("retry_at=" + str(retry_at), file=output)
+                  if category in ("provider.auth", "provider.free-limit", "provider.quota", "provider.invalid-request",
+                                  "provider.rate-limit", "provider.no-route"):
+                      print("provider_error=" + category, file=output)
+              raise SystemExit(1)
       - id: save
         name: Save review text for the publisher
         if: steps.budget.outputs.allowed == 'true'
@@ -162,6 +222,9 @@ jobs:
       REVIEW_SHA: ${{ github.event.pull_request.head.sha }}
       REASON: ${{ needs.review.outputs.reason }}
       REVIEW_STATUS: ${{ needs.review.result }}
+      RETRY_AT: ${{ needs.review.outputs.retry_at }}
+      HTTP_STATUS: ${{ needs.review.outputs.http_status }}
+      PROVIDER_ERROR: ${{ needs.review.outputs.provider_error }}
     steps:
       - name: Retrieve review text
         if: needs.review.result == 'success'
@@ -185,7 +248,16 @@ jobs:
           printf '### Авторевью OpenCode\n\nКоммит `%s` · [Журнал запуска](%s)\n\n' "$REVIEW_SHA" "$logs" > "$report"
           if [[ "$REVIEW_STATUS" == success && "$JOB_STATUS" == success && -s "$RUNNER_TEMP/review/review.md" ]]; then
             cat "$RUNNER_TEMP/review/review.md" >> "$report"
+          elif [[ "$REASON" == rate_limited ]]; then
+            echo 'Провайдер ограничил частоту запросов (HTTP 429, `rate_limited`). Ревью не получено.' >> "$report"
+            if [[ "$RETRY_AT" =~ ^[1-9][0-9]*$ ]] && when=$(date -u -d "@$RETRY_AT" '+%Y-%m-%d %H:%M:%S UTC' 2>/dev/null); then
+              printf 'Повтор возможен не раньше %s.\n' "$when" >> "$report"
+            fi
           else
             printf 'Нужен человек. Причина `%s`.\n' "${REASON:-infra}" >> "$report"
+            if [[ "$HTTP_STATUS" =~ ^[1-5][0-9][0-9]$ ]]; then printf 'Провайдер вернул HTTP %s.\n' "$HTTP_STATUS" >> "$report"; fi
+          fi
+          if [[ -n "$PROVIDER_ERROR" ]]; then
+            printf 'OpenCode сообщил об ошибке `%s`.\n' "$PROVIDER_ERROR" >> "$report"
           fi
           gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --body-file "$report"
