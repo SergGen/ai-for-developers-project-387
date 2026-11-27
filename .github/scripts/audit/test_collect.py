@@ -1,4 +1,5 @@
 import hashlib
+from io import BytesIO
 import json
 import os
 from pathlib import Path
@@ -6,6 +7,9 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import Mock, patch
+
+from collect import wait_for_calendar
 
 
 SCRIPT = Path(__file__).with_name("collect.py")
@@ -55,3 +59,8 @@ class CollectionTest(unittest.TestCase):
         self.assertTrue(meta["reason"])
         self.assertRegex(meta["report_id"], r"^[a-f0-9]{64}$")
         self.assertFalse((output / "report.json").exists())
+
+    def test_unexpected_health_payload_has_a_diagnostic(self):
+        with patch("collect.urlopen", return_value=BytesIO(b"[]")):
+            with self.assertRaisesRegex(RuntimeError, "Calendar /health"):
+                wait_for_calendar(Mock(**{"poll.return_value": None}), "http://127.0.0.1/")
