@@ -6,6 +6,8 @@ import { formatBookingDate, formatSlotTime } from './bookingTime.ts'
 import { SlotPicker } from './SlotPicker.tsx'
 import './BookingPage.css'
 
+const maxTopicLength = 200
+
 type Availability =
   | { status: 'loading' }
   | { status: 'loaded'; window: SlotWindow }
@@ -38,6 +40,7 @@ export function BookingPage({ eventTypePath }: { eventTypePath: string }) {
   const [selectedDay, setSelectedDay] = useState<string>()
   const [selectedSlot, setSelectedSlot] = useState<Slot>()
   const [guestName, setGuestName] = useState('')
+  const [topic, setTopic] = useState('')
   const [submission, setSubmission] = useState<Submission>({ status: 'idle' })
 
   useEffect(() => {
@@ -54,6 +57,13 @@ export function BookingPage({ eventTypePath }: { eventTypePath: string }) {
   const title = eventType?.title ?? 'Выбор слота'
   const busy = submission.status === 'submitting' || submission.status === 'refreshing'
   const reselectionReason = 'reason' in submission ? submission.reason : undefined
+  const topicTooLong = [...topic.trim()].length > maxTopicLength
+  const topicErrorId = 'topic-error'
+  const hasSubmissionError =
+    reselectionReason === 'conflict' ||
+    reselectionReason === 'expired' ||
+    submission.status === 'refresh-failed' ||
+    submission.status === 'failed'
   const day = selectedDay && slotWindow?.days.includes(selectedDay) ? selectedDay : slotWindow?.days[0]
 
   function selectDay(day: string) {
@@ -81,12 +91,12 @@ export function BookingPage({ eventTypePath }: { eventTypePath: string }) {
 
   async function confirmBooking(event: SubmitEvent<HTMLFormElement>) {
     event.preventDefault()
-    if (busy || !eventType || !selectedSlot || !guestName.trim()) return
+    if (busy || !eventType || !selectedSlot || !guestName.trim() || topicTooLong) return
 
     setSubmission({ status: 'submitting' })
     try {
       const { data, response } = await createBooking({
-        body: { eventTypeId: eventType.id, startsAt: selectedSlot.startsAt, guestName },
+        body: { eventTypeId: eventType.id, startsAt: selectedSlot.startsAt, guestName, topic },
       })
       if (data) {
         setSubmission({ status: 'confirmed', booking: data })
@@ -153,16 +163,28 @@ export function BookingPage({ eventTypePath }: { eventTypePath: string }) {
                   <input name="guestName" autoComplete="name" value={guestName}
                     onChange={(event) => setGuestName(event.target.value)} required />
                 </label>
-                <button className="booking-link" type="submit" disabled={!selectedSlot || !guestName.trim()}>
+                <label>
+                  Тема встречи
+                  <input name="topic" value={topic}
+                    aria-invalid={topicTooLong || undefined}
+                    aria-describedby={topicTooLong ? topicErrorId : undefined}
+                    onChange={(event) => setTopic(event.target.value)} placeholder="Необязательно" />
+                </label>
+                <button className="booking-link" type="submit" disabled={!selectedSlot || !guestName.trim() || topicTooLong}>
                   {submission.status === 'submitting' ? 'Подтверждаем…' : 'Подтвердить запись'}
                 </button>
               </fieldset>
-              <p role="alert">
-                {reselectionReason === 'conflict' && 'Это время уже занято. Выберите другой слот'}
-                {reselectionReason === 'expired' && 'Выбранный слот больше недоступен. Выберите другое время.'}
-                {submission.status === 'refresh-failed' && ' Не удалось обновить слоты.'}
-                {submission.status === 'failed' && 'Не удалось подтвердить запись. Попробуйте ещё раз.'}
-              </p>
+              {topicTooLong && (
+                <p id={topicErrorId} role="alert">Тема встречи не должна превышать {maxTopicLength} символов</p>
+              )}
+              {hasSubmissionError && (
+                <p role="alert">
+                  {reselectionReason === 'conflict' && 'Это время уже занято. Выберите другой слот'}
+                  {reselectionReason === 'expired' && 'Выбранный слот больше недоступен. Выберите другое время.'}
+                  {submission.status === 'refresh-failed' && ' Не удалось обновить слоты.'}
+                  {submission.status === 'failed' && 'Не удалось подтвердить запись. Попробуйте ещё раз.'}
+                </p>
+              )}
               {submission.status === 'refresh-failed' && (
                 <button className="booking-link" type="button" onClick={() => refreshSlots(submission.reason)}>
                   Повторить загрузку

@@ -45,6 +45,7 @@ export function UpcomingBookingsPage() {
             <li key={booking.startsAt}>
               <h2>{booking.guestName}</h2>
               <p>{booking.eventType.title}</p>
+              {booking.topic && <p>Тема: {booking.topic}</p>}
               <p>
                 <time dateTime={booking.startsAt}>{formatBookingDate(booking.startsAt)}</time>
                 {' · '}{formatSlotTime(booking)} по Москве

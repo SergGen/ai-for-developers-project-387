@@ -6,7 +6,10 @@ import type { Interval } from './schedule.ts'
 export interface Booking extends Interval {
   eventTypeId: string
   guestName: string
+  topic?: string
 }
+
+const maxTopicLength = 200
 
 export function listUpcomingBookings(
   catalog: ReadonlyMap<string, EventType>,
@@ -57,7 +60,13 @@ export function createBooking(
       return
     }
 
-    calendar.push({ ...interval, eventTypeId, guestName: name })
-    reply.code(201).send({ ...interval, eventType, guestName: name })
+    const topic = request.body.topic?.trim() || undefined
+    if (topic && [...topic].length > maxTopicLength) {
+      reply.code(400).send({ message: `Тема встречи не должна превышать ${maxTopicLength} символов` })
+      return
+    }
+
+    calendar.push({ ...interval, eventTypeId, guestName: name, topic })
+    reply.code(201).send({ ...interval, eventType, guestName: name, topic })
   }
 }

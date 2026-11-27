@@ -28,7 +28,7 @@ test('GET /api/bookings/upcoming returns future meetings of all types by start t
     const bookings = [
       { eventTypeId: consultation.id, guestName: 'София', startsAt: '2026-11-30T09:00:00.000Z' },
       { eventTypeId: review.id, guestName: 'Анна', startsAt: '2026-11-30T06:00:00.000Z' },
-      { eventTypeId: review.id, guestName: 'Борис', startsAt: '2026-11-30T08:00:00.000Z' },
+      { eventTypeId: review.id, guestName: 'Борис', startsAt: '2026-11-30T08:00:00.000Z', topic: 'Обсудить проект' },
     ]
     for (const booking of bookings) {
       const response = await fetch(`${address}/api/bookings`, {
@@ -44,7 +44,7 @@ test('GET /api/bookings/upcoming returns future meetings of all types by start t
 
     expect(response.status).toBe(200)
     expect(await response.json()).toEqual([
-      { eventType: review, guestName: 'Борис', startsAt: '2026-11-30T08:00:00.000Z', endsAt: '2026-11-30T09:00:00.000Z' },
+      { eventType: review, guestName: 'Борис', topic: 'Обсудить проект', startsAt: '2026-11-30T08:00:00.000Z', endsAt: '2026-11-30T09:00:00.000Z' },
       { eventType: consultation, guestName: 'София', startsAt: '2026-11-30T09:00:00.000Z', endsAt: '2026-11-30T09:30:00.000Z' },
     ])
   })
