@@ -96,7 +96,7 @@ jobs:
       - name: Install reviewer
         if: steps.budget.outputs.allowed == 'true'
         env:
-          MODEL_KEY_PRESENT: ${{ secrets.OPENCODE_API_KEY != '' }}
+          MODEL_KEY_PRESENT: ${{ secrets.OPENROUTER_API_KEY != '' }}
         run: |
           [[ "$MODEL_KEY_PRESENT" == true || "$MODEL_KEY_PRESENT" == True ]]
           npm install --prefix "$RUNNER_TEMP/reviewer" --ignore-scripts --no-audit --no-fund @opencode/cli-linux-x64@2.4.2
@@ -106,7 +106,7 @@ jobs:
         if: steps.budget.outputs.allowed == 'true'
         shell: python
         env:
-          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
         run: |
           import json
           import os
@@ -117,14 +117,14 @@ jobs:
 
           root = Path(os.environ["RUNNER_TEMP"])
           binary = root / "reviewer/node_modules/@opencode/cli-linux-x64/bin/opencode"
-          model = "opencode/hy4-flash-free#none"
+          model = "openrouter/openrouter/free"
           deny_all = {"action": "*", "resource": "*", "effect": "deny"}
           config = {
               "update": "disable", "share": "disabled", "snapshots": False,
               "permissions": [deny_all],
               "policies": [{**deny_all, "action": action} for action in ("tool.use", "mcp.use", "plugin.use")],
               "agents": {"title": {"model": model}},
-              "providers": {"opencode": {"settings": {"headerTimeout": 50000, "chunkTimeout": 50000, "timeout": 55000}}},
+              "providers": {"openrouter": {"settings": {"headerTimeout": 50000, "chunkTimeout": 50000, "timeout": 55000}}},
           }
           counts = {"step_start": 0, "step_finish": 0, "text": 0, "retry": 0, "error": 0}
           status, retry_at, category = None, None, ""
@@ -136,7 +136,7 @@ jobs:
               # The private server gets only this config and this provider key.
               env = {"HOME": str(home), "PATH": os.defpath, "LANG": "C.UTF-8", "CI": "true",
                      "OPENCODE_CONFIG_PROJECT_DISABLE": "1", "OPENCODE_DISABLE_MODELS_FETCH": "1",
-                     "OPENCODE_CONFIG_CONTENT": json.dumps(config), "OPENCODE_API_KEY": os.environ["OPENCODE_API_KEY"]}
+                     "OPENCODE_CONFIG_CONTENT": json.dumps(config), "OPENROUTER_API_KEY": os.environ["OPENROUTER_API_KEY"]}
               command = ["timeout", "--kill-after=10s", "420s", binary, "run", "--standalone", "--log-level", "none",
                          "--title", "PR #" + os.environ["PR_NUMBER"] + " independent review", "--model", model,
                          "--format", "json", "Используй предоставленные данные и заверши ревью одним текстовым ответом. "
